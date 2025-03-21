@@ -1,0 +1,5 @@
+{
+	"python.analysis.extraPaths": [
+		"./guilherme/src/data"
+	]
+}
