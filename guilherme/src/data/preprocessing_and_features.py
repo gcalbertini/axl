@@ -2,7 +2,9 @@ import os
 import pandas as pd
 import numpy as np
 import argparse
-
+import base64
+from IPython.display import HTML, display
+import webbrowser
 
 def load_data(orgs_csv_path, holdings_csv_path):
     """
@@ -377,6 +379,12 @@ def engineer_org_features(df_orgs, df_holdings):
             df_orgs_enhanced[col] = df_orgs_enhanced[col].fillna(mode_value)
     return df_orgs_enhanced
 
+def create_download_link(df, title="Download CSV file", filename="data.csv"):
+
+    csv = df.to_csv(index=False)
+    b64 = base64.b64encode(csv.encode()).decode()  # Encode the CSV to Base64
+    href = f'<a href="data:text/csv;base64,{b64}" download="{filename}">{title}</a>'
+    return href
 
 def main(orgs_csv_path, holdings_csv_path, stocks_csv_path):
     import sys
@@ -471,11 +479,27 @@ def main(orgs_csv_path, holdings_csv_path, stocks_csv_path):
     df_orgs = df_orgs.drop(columns=["cik"])
     df_orgs.info()
 
-    df_holdings = engineer_holdings_features(df_holdings)
-    df_orgs = engineer_org_features(df_orgs, df_holdings)
-
-    df_orgs.to_csv("guilherme/data/raw/", index=False) # run as admin...
-    df_holdings.to_csv("guilherme/data/raw/", index=False)
+     # Create download links for the enhanced DataFrames
+    orgs_html = create_download_link(df_orgs, "Download Org Features CSV", "org_features.csv")
+    holdings_html = create_download_link(df_holdings, "Download Holdings Features CSV", "holdings_features.csv")
+    
+    # Write the HTML content to a temporary file and open it in the default web browser
+    html_content = f"""
+    <html>
+      <head><title>CSV Download Links</title></head>
+      <body>
+        <h2>CSV Download Links</h2>
+        <p>{orgs_html}</p>
+        <p>{holdings_html}</p>
+      </body>
+    </html>
+    """
+    temp_html_path = "download_links.html"
+    with open(temp_html_path, "w", encoding="utf-8") as f:
+        f.write(html_content)
+    
+    print(f"Opening download links in your default web browser. If they do not appear, open {temp_html_path} manually.")
+    webbrowser.open(f"file://{os.path.abspath(temp_html_path)}")
 
 if __name__ == "__main__":
     # Use argparse to allow file paths to be passed from the command line.
