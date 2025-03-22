@@ -91,7 +91,7 @@ class A_llmrec_model(nn.Module):
     def save_model(self, args, epoch1=None, epoch2=None):
         out_dir = "guilherme/src/the_sauce/saved_models/"
         create_dir(out_dir)
-        out_dir += "a_llmrec"+f"_{args.recsys}_{epoch1}_"
+        out_dir += "a_llmrec" + f"_{args.recsys}_{epoch1}_"
         if args.pretrain_stage1:
             torch.save(self.sbert.state_dict(), out_dir + "sbert.pt")
             torch.save(self.mlp.state_dict(), out_dir + "mlp.pt")
@@ -104,7 +104,7 @@ class A_llmrec_model(nn.Module):
 
     def load_model(self, args, phase1_epoch=None, phase2_epoch=None):
         out_dir = "guilherme/src/the_sauce/saved_models/"
-        out_dir += "a_llmrec"+f"_{args.recsys}_{phase1_epoch}_"
+        out_dir += "a_llmrec" + f"_{args.recsys}_{phase1_epoch}_"
 
         mlp = torch.load(out_dir + "mlp.pt", map_location=args.device)
         self.mlp.load_state_dict(mlp)
@@ -180,6 +180,7 @@ class A_llmrec_model(nn.Module):
         u, seq, pos, neg = data
         indices = [self.maxlen * (i + 1) - 1 for i in range(u.shape[0])]
 
+        # This returns the item embeddings learned solely from interaction data.
         with torch.no_grad():
             log_emb, pos_emb, neg_emb = self.recsys.model(u, seq, pos, neg, mode="item")
 
@@ -210,6 +211,7 @@ class A_llmrec_model(nn.Module):
             end_inx += 60
             iterss += 1
 
+            # You then get text representations by calling:
             pos_text = self.find_item_text(pos__)
             neg_text = self.find_item_text(neg__)
 
@@ -228,6 +230,11 @@ class A_llmrec_model(nn.Module):
                 }
             )["sentence_embedding"]
 
+            # The recsys embeddings (from pos_emb, neg_emb) are then passed through an MLP (self.mlp)
+            # to get a projected representation. Simultaneously, the text embeddings from sbert are
+            # passed through a separate MLP (self.mlp2). The model then computes a matching loss (via MSELoss) between
+            # these two sets of representations; This matching loss forces the collaborative embeddings to be aligned
+            # with the content (text) features, effectively enriching the representations.
             pos_text_matching, pos_proj = self.mlp(pos_emb)
             neg_text_matching, neg_proj = self.mlp(neg_emb)
 

@@ -252,22 +252,24 @@ def preprocess(df, processed_org_path, seq_out_file):
 parser = argparse.ArgumentParser()
 parser.add_argument(
     "--dataset",
+    type=str,
     required=False,
-    help="Dataset name or path prefix for the sequential data",
+    help="Path to the processed holdings CSV file",
     default="guilherme/data/processed/holdings_processed.csv",
 )
 parser.add_argument(
     "--processed_orgs_csv",
+    type=str,
     required=False,
-    help="Dataset name or path prefix for the sequential data",
+    help="Path to the processed orgs CSV file",
     default="guilherme/data/processed/orgs_processed.csv",
 )
-parser.add_argument("--batch_size", default=128, type=int)
-parser.add_argument("--lr", default=0.001, type=float)
+parser.add_argument("--batch_size", default=64, type=int)
+parser.add_argument("--lr", default=0.002, type=float)
 parser.add_argument("--maxlen", default=50, type=int)
 parser.add_argument("--hidden_units", default=50, type=int)
 parser.add_argument("--num_blocks", default=2, type=int)
-parser.add_argument("--num_epochs", default=150, type=int)
+parser.add_argument("--num_epochs", default=160, type=int)
 parser.add_argument("--num_heads", default=1, type=int)
 parser.add_argument("--dropout_rate", default=0.5, type=float)
 parser.add_argument("--l2_emb", default=0.0, type=float)
@@ -280,42 +282,82 @@ parser.add_argument("--inference_only", default=False, action="store_true")
 parser.add_argument("--state_dict_path", default=None, type=str)
 parser.add_argument(
     "--seq_file",
+    type=str,
     required=False,
-    help="Path to output the sequential interactions txt file",
+    help="Path to output the raw interactions text file",
     default="guilherme/data/processed/sequences.txt",
+)
+# New argument: path to a processed holdings file with extra features.
+extra_feature_cols = [
+    "growth_of_mv",
+    "rank_change",
+    "shares_change_ratio",
+    "avg_share_price",
+    "percent_change",
+    "avg_share_price",
+    "position_change_type",
+    "filer_id",
+    "percent_ownership",
+]
+parser.add_argument(
+    "--holdings_extra_features",
+    type=str,
+    required=False,
+    help="Extra item features (e.g., from df_holdings_processed) to enrich vector in list.",
+    default=extra_feature_cols,
 )
 args = parser.parse_args()
 
 if __name__ == "__main__":
     # --- Preprocessing: Create raw interactions text file from holdings CSV ---
-    # We assume that the raw holdings CSV has already been preprocessed with feature engineering.
-    # Instead of creating a sequential CSV with separate history and target columns,
-    # we will create a text file where each line is "org_id stock_id", as in the original logic.
-    if not os.path.exists(args.seq_file):
+    if not os.path.exists(args.seq_file) or args.holdings_extra_features:
         print(
-            "Raw interactions text file does not exist; creating one from holdings CSV..."
+            "Detected new features to enrich baseline or raw interactions text file does not exist; creating one from holdings CSV..."
         )
-        # Load the holdings data with progress.
         df = read_csv_with_progress(args.dataset, chunksize=256, total_rows=173922)
         print("Columns in the DataFrame:", df.columns.tolist())
-        # Build the User dictionary from the holdings data.
+        # Call preprocess() to generate interactions file and save org meta.
+        # Assume preprocess() writes the file at args.seq_file.
         preprocess(df, args.processed_orgs_csv, args.seq_file)
-        # Write out a text file in the format: "org_id_encoded stock_id_encoded" for each interaction.
         print("Raw interactions text file saved to", args.seq_file)
     else:
-        print("Raw interactions text file exists; loading data from", args.seq_file)
+        print(
+            "Raw interactions text file exists or no new features to enrich baseline; loading data from",
+            args.seq_file,
+        )
 
     # --- Partition the Interactions Data ---
-    # Use the original data_partition function, which expects a text file where each line is "org_id_encoded stock_id_encoded" .
     dataset = data_partition(args.seq_file)
     [user_train, user_valid, user_test, usernum, itemnum] = dataset
     print("Total users:", usernum, "Total items:", itemnum)
-
     num_batch = len(user_train) // args.batch_size
     total_length = sum(len(seq) for seq in user_train.values())
     print("Average sequence length: %.2f" % (total_length / len(user_train)))
 
-    # Dataloader
+    # --- Load extra item features ---
+
+    # Hack -- lets include some one hot columns, too
+    if args.holdings_extra_features:
+        # Build a lookup dictionary: item_id -> extra features vector.
+        extra_one_hot = [
+            col
+            for col in df.columns
+            if col.startswith("sector_") or col.startswith("industry_")
+        ]
+        extra_feature_cols += extra_one_hot
+
+        item_extra_features = {}
+        for idx, row in df.iterrows():
+            # Assuming "stock_id" here is already encoded as integer.
+            item_id = row["stock_id"]
+            features = row[extra_feature_cols].values.astype(np.float32)
+            item_extra_features[item_id] = features
+        # Determine the feature dimension.
+        combined_feat_dim = len(extra_feature_cols)
+    else:
+        args.holdings_extra_features = None
+
+    # --- Dataloader ---
     sampler = WarpSampler(
         user_train,
         usernum,
@@ -325,12 +367,15 @@ if __name__ == "__main__":
         n_workers=3,
     )
 
-    # Model initialization
-    model = SASRec(usernum, itemnum, args).to(args.device)
+    # --- Model initialization ---
+    # Here, we modify SASRec to accept additional item features.
+    # We assume args now includes combined_feat_dim.
+    args.combined_feat_dim = combined_feat_dim
+    model = SASRec(usernum, itemnum, args, combined_feat_dim).to(args.device)
     for name, param in model.named_parameters():
         try:
             torch.nn.init.xavier_normal_(param.data)
-        except:
+        except Exception as e:
             pass
     model.train()
 
@@ -345,9 +390,10 @@ if __name__ == "__main__":
             model.load_state_dict(checkpoint)
             tail = args.state_dict_path[args.state_dict_path.find("epoch=") + 6 :]
             epoch_start_idx = int(tail[: tail.find(".")]) + 1
-        except:
+        except Exception as e:
             print(
-                "failed loading state_dicts, pls check file path:", args.state_dict_path
+                "Failed loading state_dicts, please check file path:",
+                args.state_dict_path,
             )
             import pdb
 
@@ -356,7 +402,7 @@ if __name__ == "__main__":
     if args.inference_only:
         model.eval()
         t_test = evaluate(model, dataset, args)
-        print("test (NDCG@10: %.4f, HR@10: %.4f)" % (t_test[0], t_test[1]))
+        print("Test (NDCG@10: %.4f, HR@10: %.4f)" % (t_test[0], t_test[1]))
 
     bce_criterion = torch.nn.BCEWithLogitsLoss()
     adam_optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.98))
@@ -364,13 +410,42 @@ if __name__ == "__main__":
     T = 0.0
     t0 = time.time()
 
+    """
+        During training, both the positive interactions (what the user actually did) and
+        negative samples (what the user did not do) are used. The model uses both sets of 
+        logits to compute a loss (often a binary cross-entropy or pairwise ranking loss) that 
+        encourages the model to rank positive items higher than negatives.
+    
+    """
+
+    # --- Training Loop ---
     for epoch in tqdm(range(epoch_start_idx, args.num_epochs + 1)):
         if args.inference_only:
             break
         for step in range(num_batch):
             u, seq, pos, neg = sampler.next_batch()
             u, seq, pos, neg = np.array(u), np.array(seq), np.array(pos), np.array(neg)
-            pos_logits, neg_logits = model(u, seq, pos, neg)
+
+            # For the positive sequences, get the extra features:
+            # Here we assume each sequence in 'pos' is of shape [seq_len] of item ids.
+            # We'll build a tensor of shape [batch_size, seq_len, num_extra_features].
+            batch_extra_feats = []
+            for seq_item in pos:
+                seq_feats = []
+                for item in seq_item:
+                    # Use a default vector if not found.
+                    feat = item_extra_features.get(
+                        item, np.zeros(len(extra_feature_cols), dtype=np.float32)
+                    )
+                    seq_feats.append(feat)
+                batch_extra_feats.append(seq_feats)
+            batch_extra_feats = torch.tensor(batch_extra_feats, dtype=torch.float).to(
+                args.device
+            )
+
+            pos_logits, neg_logits = model(
+                u, seq, pos, neg, item_side_features=batch_extra_feats
+            )
             pos_labels = torch.ones(pos_logits.shape, device=args.device)
             neg_labels = torch.zeros(neg_logits.shape, device=args.device)
 
