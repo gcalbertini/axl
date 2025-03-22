@@ -1,116 +1,136 @@
 import os
-import os.path
-import gzip
-import json
-import pickle
-from tqdm import tqdm
+import pandas as pd
+import argparse
 from collections import defaultdict
 
-def parse(path):
-    g = gzip.open(path, 'rb')
-    for l in tqdm(g):
-        yield json.loads(l)
-        
-def preprocess(fname):
-    countU = defaultdict(lambda: 0)
-    countP = defaultdict(lambda: 0)
-    line = 0
 
-    file_path = f'../../data/amazon/{fname}.json.gz'
-    
-    # counting interactions for each user and item
-    for l in parse(file_path):
-        line += 1
-        asin = l['asin']
-        rev = l['reviewerID']
-        time = l['unixReviewTime']
-        countU[rev] += 1
-        countP[asin] += 1
-    
+def preprocess_holdings(csv_path, threshold=3):
+    """
+    Mimics the structure of the A-LLMRec's group 'preprocess' function under SASREC.
+    Instead of parsing a gzipped JSON file, we load a CSV file that contains
+    holdings data. For each row (interaction), we count interactions per org
+    and per stock, and then build a User dictionary mapping each org_id to a
+    list of stock_ids in the order they appear (assuming row order is temporal).
+
+    Parameters:
+      csv_path (str): Path to the holdings CSV file.
+      threshold (int): Minimum number of interactions for a user/stock to be included.
+                       (Set to 1 if you want to include all interactions.)
+
+    Returns:
+      User (dict): Dictionary mapping org_id to list of stock_ids (in order).
+      usermap (dict): Mapping from original org identifier to an integer ID.
+      itemmap (dict): Mapping from original stock identifier to an integer ID.
+    """
+    # Initialize counters and maps.
+    countU = defaultdict(int)
+    countP = defaultdict(int)
     usermap = dict()
-    usernum = 0
     itemmap = dict()
-    itemnum = 0
     User = dict()
-    review_dict = {}
-    name_dict = {'title':{}, 'description':{}}
-    
-    f = open(f'../../data/amazon/meta_{fname}.json', 'r')
-    json_data = f.readlines()
-    f.close()
-    data_list = [json.loads(line[:-1]) for line in json_data]
-    meta_dict = {}
-    for l in data_list:
-        meta_dict[l['asin']] = l
-    
-    for l in parse(file_path):
-        line += 1
-        asin = l['asin']
-        rev = l['reviewerID']
-        time = l['unixReviewTime']
-        
-        threshold = 5
-        if ('Beauty' in fname) or ('Toys' in fname):
-            threshold = 4
-            
-        if countU[rev] < threshold or countP[asin] < threshold:
-            continue
-        
-        if rev in usermap:
-            userid = usermap[rev]
-        else:
+    usernum = 0
+    itemnum = 0
+
+    # Load CSV into DataFrame.
+    df = pd.read_csv(csv_path)
+
+    # Iterate through the DataFrame rows in order.
+    # (We assume the CSV's row order represents the interaction order.
+    # BUG
+    # THIS IS A CRITICAL MISS IN THE DATASET -- WHERE IS TIMESTAMP DATA THATS NOT ALL THE SAME??)
+    for idx, row in df.iterrows():
+        # For our context, assume the columns for user and item are:
+        # 'org_id' and 'stock_id'
+        org = row["org_id"]
+        stock = row["stock_id"]
+
+        # Increase counts (use thresholds if needed)
+        countU[org] += 1
+        countP[stock] += 1
+
+        # Map org to a unique integer if not already mapped.
+        if org not in usermap:
             usernum += 1
-            userid = usernum
-            usermap[rev] = userid
-            User[userid] = []
-        
-        if asin in itemmap:
-            itemid = itemmap[asin]
-        else:
+            usermap[org] = usernum
+            User[usermap[org]] = []  # Use the mapped integer as the key.
+
+        # Map stock to a unique integer if not already mapped.
+        if stock not in itemmap:
             itemnum += 1
-            itemid = itemnum
-            itemmap[asin] = itemid
-        User[userid].append([time, itemid])
-        
-        
-        if itemmap[asin] in review_dict:
-            try:
-                review_dict[itemmap[asin]]['review'][usermap[rev]] = l['reviewText']
-            except:
-                a = 0
-            try:
-                review_dict[itemmap[asin]]['summary'][usermap[rev]] = l['summary']
-            except:
-                a = 0
-        else:
-            review_dict[itemmap[asin]] = {'review': {}, 'summary':{}}
-            try:
-                review_dict[itemmap[asin]]['review'][usermap[rev]] = l['reviewText']
-            except:
-                a = 0
-            try:
-                review_dict[itemmap[asin]]['summary'][usermap[rev]] = l['summary']
-            except:
-                a = 0
-        try:
-            if len(meta_dict[asin]['description']) ==0:
-                name_dict['description'][itemmap[asin]] = 'Empty description'
-            else:
-                name_dict['description'][itemmap[asin]] = meta_dict[asin]['description'][0]
-            name_dict['title'][itemmap[asin]] = meta_dict[asin]['title']
-        except:
-            a =0
-    
-    with open(f'../../data/amazon/{fname}_text_name_dict.json.gz', 'wb') as tf:
-        pickle.dump(name_dict, tf)
-    
-    for userid in User.keys():
-        User[userid].sort(key=lambda x: x[0])
-        
-    print(usernum, itemnum)
-    
-    f = open(f'../../data/amazon/{fname}.txt', 'w')
-    for user in User.keys():
-        for i in User[user]:
-            f.write('%d %d\n' % (user, i[1]))
-    f.close()
+            itemmap[stock] = itemnum
+
+        # Append the interaction.
+        # Since no explicit timestamp exists, we simply record the mapped item id...
+        User[usermap[org]].append(itemmap[stock])
+
+    # Optionally, filter out users or items below a threshold.
+    # (For example, only include users with at least 3 interactions.)
+    User_filtered = {u: seq for u, seq in User.items() if len(seq) >= threshold}
+
+    print(
+        f"Total users (after filtering): {len(User_filtered)}; Total items: {len(itemmap)}"
+    )
+    return User_filtered, usermap, itemmap
+
+
+def create_sequences_from_User(
+    User, output_csv, user_key="org_id", item_key="stock_id"
+):
+    """
+    Convert the User dictionary (from preprocess_holdings) into sequential training examples.
+
+    For each user with at least two interactions, the history is all items except the last,
+    and the target is the last item. The output CSV will have three columns:
+      - org_id (mapped user id)
+      - history: a space-separated list of item tokens
+      - target: the next item to predict.
+
+    Parameters:
+      User (dict): Dictionary mapping user IDs to lists of item IDs.
+      output_csv (str): Path to save the output CSV file.
+      user_key (str): Column name for user ID in the output.
+      item_key (str): Column name for items (for clarity, though items are stored as integers).
+
+    Returns:
+      df_seq (DataFrame): DataFrame of sequential examples.
+    """
+    data = []
+    for user, sequence in User.items():
+        if len(sequence) < 2:
+            continue  # Skip users with fewer than 2 interactions.
+        # Use all but the last item as history, and the last item as the target.
+        history = " ".join(map(str, sequence[:-1]))
+        target = sequence[-1]
+        data.append({user_key: user, "history": history, "target": target})
+
+    df_seq = pd.DataFrame(data)
+    df_seq.to_csv(output_csv, index=False)
+    return df_seq
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Preprocess holdings CSV data to create sequential interaction examples for a SASRec-style model."
+    )
+    parser.add_argument(
+        "--input",
+        type=str,
+        required=False,
+        help="Path to the holdings CSV file.",
+        default="guilherme/data/raw/holdings_processed.csv",
+    )
+    parser.add_argument(
+        "--output",
+        type=str,
+        required=False,
+        help="Path to the output CSV file with sequences.",
+        default="guilherme/data/raw/"
+    )
+    args = parser.parse_args()
+
+    # Preprocess the holdings CSV to get the User dictionary.
+    User, usermap, itemmap = preprocess_holdings(args.input)
+
+    # Create sequential training examples from the User dictionary.
+    df_sequences = create_sequences_from_User(User, args.output)
+    print("Sequential data created and saved to:", args.output)
