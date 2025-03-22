@@ -1,6 +1,8 @@
 download_links.html
 data/
-
+guilherme/src/the_sauce/saved_models/
+*.pt
+*.pth
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

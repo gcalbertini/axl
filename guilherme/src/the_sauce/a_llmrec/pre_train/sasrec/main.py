@@ -1,13 +1,12 @@
 from collections import defaultdict
 import os
 import time
-from pandas.io import json
 import torch
 import argparse
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
-import json
+import pickle
 import gzip
 from model import SASRec
 from utils import (
@@ -56,7 +55,7 @@ Thus, the recommendation process leverages our holdings data to generate actiona
 NOTE TECHNICAL DISCUSSION:
 
 NOTE: In a standard SASRec setup, the focus is on the interaction sequences 
-derived from holdings. The orgs data (which might include bios and other metadata) 
+derived from holdings. The orgs data (which might include bios and other dictdata) 
 can later be used to enrich user representations in a hybrid or two-tower model 
 (e.g., A-LLMRec). For SASRec alone, however, the sequential examples are the primary input.
 MAJOR BUG Timestamp data is all wrong (all the same) so this is all assuming order inherent in CSV for transactions 
@@ -124,7 +123,7 @@ def read_csv_with_progress(filename, chunksize=256, total_rows=None):
     return df
 
 
-def preprocess(df, orgs_csv_path, seq_out_file):
+def preprocess(df, processed_org_path, seq_out_file):
     """
     Process the holdings CSV file to generate:
       - Counts of interactions per investor and per company.
@@ -132,11 +131,11 @@ def preprocess(df, orgs_csv_path, seq_out_file):
       - A User dictionary mapping each new investor ID to a list of interactions,
         where each interaction is represented as [timestamp, itemid].
         Since no timestamp is available, we assign one by incrementing a counter.
-      - An org_meta dictionary mapping each new investor ID to meta information
+      - An org_dict dictionary mapping each new investor ID to dict information
         obtained from the orgs CSV (using the 'bio' field and optionally 'ticker').
 
     The function also saves:
-      - org_meta as a gzipped JSON file.
+      - org_dict as a gzipped pickle file.
       - A text file with one interaction per line in the format "userid itemid".
 
       User (dict): Mapping from new investor IDs to lists of interactions.
@@ -149,7 +148,7 @@ def preprocess(df, orgs_csv_path, seq_out_file):
     # First pass: count interactions.
     for idx, row in df.iterrows():
         org = row["org_id_encoded"]
-        stock = row["stock_id_encoded"]
+        stock = row["stock_id"]
         countU[org] += 1
         countP[stock] += 1
 
@@ -159,9 +158,6 @@ def preprocess(df, orgs_csv_path, seq_out_file):
     itemnum = 0
     User = {}
 
-    # We'll also build org_meta using the 'bio' and 'ticker' fields from df_orgs.
-    org_meta = {}
-
     # Set threshold for minimum interactions.
     threshold = 4
     timestamp_counter = 0  # Arbitrary timestamp incrementer; assumed order inherently captures this dummy var
@@ -169,7 +165,7 @@ def preprocess(df, orgs_csv_path, seq_out_file):
     # Second pass: build mappings and the User dictionary.
     for idx, row in df.iterrows():
         org = row["org_id_encoded"]
-        stock = row["stock_id_encoded"]
+        stock = row["stock_id"]
         # Assign an arbitrary timestamp using the counter.
         timestamp = timestamp_counter
         timestamp_counter += 1
@@ -197,26 +193,50 @@ def preprocess(df, orgs_csv_path, seq_out_file):
         # Append interaction as [timestamp, itemid].
         User[userid].append([timestamp, itemid])
 
-    # Load the orgs CSV to build org_meta.
-    df_orgs = pd.read_csv(orgs_csv_path)
-    # Build a mapping from original org_id to the corresponding bio (and ticker if available).
+    # Load the orgs CSV to build org_dict.
+    df_orgs = pd.read_csv(processed_org_path)
+    """
+    
     for orig_org, new_id in usermap.items():
         # Filter df_orgs rows where org_id matches.
         row = df_orgs[df_orgs["org_id_encoded"] == orig_org]
         if not row.empty:
             bio = row.iloc[0].get("bio", "No bio available")
-            ticker = row.iloc[0].get("ticker", "No ticker")
+            ticker = row.iloc[0].get("stock_ticker", "Unknown")
         else:
             bio = "No bio available"
-            ticker = "No ticker"
-        org_meta[new_id] = {"bio": bio, "ticker": ticker}
+            ticker = "Unknown"
+        org_dict[new_id] = {"bio": bio, "stock_ticker": ticker}
+    
+    """
+    # Create a dictionary with two keys: "bio" and "stock_ticker"
+    text_name_dict = {"bio": {}, "stock_ticker": {}}
+    for orig_org, new_id in usermap.items():
+        # Filter df_orgs rows where org_id matches.
+        row = df_orgs[df_orgs["org_id_encoded"] == orig_org]
+        if not row.empty:
+            bio = row.iloc[0].get("bio", "No bio available")
+            ticker = row.iloc[0].get("stock_ticker", "Unknown")
+        else:
+            bio = "No bio available"
+            ticker = "Unknown"
+        # Instead of using new_id as the key for a nested dict,
+        # assign it as a key in each top-level dictionary.
+        text_name_dict["bio"][new_id] = bio
+        text_name_dict["stock_ticker"][new_id] = ticker
 
-    # Save the org_meta dictionary as a gzipped JSON file.
-    org_meta_path = f"guilherme/data/processed/holdings_org_meta.json.gz"
-    with gzip.open(org_meta_path, "wt", encoding="utf-8") as tf:
-        json.dump(org_meta, tf)
+    # Save the org_dict dictionary as a gzipped pickle file.
+    org_dict_path = "guilherme/data/processed/holdings_org_dict.pkl.gz"
+    with gzip.open(org_dict_path, "wb") as tf:
+        pickle.dump(text_name_dict, tf)
 
     print("Total new org IDs:", usernum, "Total new stock IDs:", itemnum)
+
+    # List of interactions for that user will be sorted in ascending order based on the timestamp.
+    # This ensures that the interactions are ordered according to the time they occurred
+    # (or, in our case, the arbitrary order defined by our arbitrary counter).
+    for userid in User.keys():
+        User[userid].sort(key=lambda x: x[0])
 
     # Write out a text file with one interaction per line in the format "userid itemid".
     with open(seq_out_file, "w") as f:
@@ -224,7 +244,6 @@ def preprocess(df, orgs_csv_path, seq_out_file):
             for interaction in User[user]:
                 # interaction[1] is the itemid.
                 f.write("%d %d\n" % (user, interaction[1]))
-
 
 
 ##############################################
@@ -235,31 +254,35 @@ parser.add_argument(
     "--dataset",
     required=False,
     help="Dataset name or path prefix for the sequential data",
-    default="guilherme/data/raw/holdings_processed.csv",
+    default="guilherme/data/processed/holdings_processed.csv",
 )
 parser.add_argument(
-    "--orgs_csv",
+    "--processed_orgs_csv",
     required=False,
     help="Dataset name or path prefix for the sequential data",
-    default="guilherme/data/raw/orgs_processed.csv",
+    default="guilherme/data/processed/orgs_processed.csv",
 )
 parser.add_argument("--batch_size", default=128, type=int)
 parser.add_argument("--lr", default=0.001, type=float)
 parser.add_argument("--maxlen", default=50, type=int)
 parser.add_argument("--hidden_units", default=50, type=int)
 parser.add_argument("--num_blocks", default=2, type=int)
-parser.add_argument("--num_epochs", default=200, type=int)
+parser.add_argument("--num_epochs", default=150, type=int)
 parser.add_argument("--num_heads", default=1, type=int)
 parser.add_argument("--dropout_rate", default=0.5, type=float)
 parser.add_argument("--l2_emb", default=0.0, type=float)
-parser.add_argument("--device", default=torch.device("cuda" if torch.cuda.is_available() else "cpu"), type=str)
+parser.add_argument(
+    "--device",
+    default=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+    type=str,
+)
 parser.add_argument("--inference_only", default=False, action="store_true")
 parser.add_argument("--state_dict_path", default=None, type=str)
 parser.add_argument(
     "--seq_file",
     required=False,
     help="Path to output the sequential interactions txt file",
-    default="guilherme/data/processed/df_seq.txt",
+    default="guilherme/data/processed/sequences.txt",
 )
 args = parser.parse_args()
 
@@ -276,7 +299,7 @@ if __name__ == "__main__":
         df = read_csv_with_progress(args.dataset, chunksize=256, total_rows=173922)
         print("Columns in the DataFrame:", df.columns.tolist())
         # Build the User dictionary from the holdings data.
-        preprocess(df, args.orgs_csv, args.seq_file)
+        preprocess(df, args.processed_orgs_csv, args.seq_file)
         # Write out a text file in the format: "org_id_encoded stock_id_encoded" for each interaction.
         print("Raw interactions text file saved to", args.seq_file)
     else:

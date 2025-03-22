@@ -610,7 +610,9 @@ def main(orgs_csv_path, holdings_csv_path, stocks_csv_path):
         lambda row: fill_avg_price(row, sector_medians), axis=1
     )
 
-    df_holdings = df_holdings.drop(columns=["stock_name"])  # stock_id describes these
+    df_holdings = df_holdings.drop(
+        columns=["stock_name"]
+    )  # stock_id, stock_ticker describes these
 
     # --- Feature Engineering on Holdings ---
     df_holdings = engineer_holdings_features(df_holdings)
@@ -620,11 +622,7 @@ def main(orgs_csv_path, holdings_csv_path, stocks_csv_path):
     df_orgs["stock_ticker"] = df_orgs["stock_ticker"].fillna("Unknown")
     df_orgs["stock_id"] = df_orgs["stock_id"].fillna(0)
     df_orgs = df_orgs.dropna(subset=["filer_id"])
-    df_orgs = df_orgs.drop(columns=["cik", "stock_ticker"])
-
-    df_holdings = df_holdings.drop(
-        columns=["stock_ticker"]
-    )  # after matching can drop as stock_id describes this
+    df_orgs = df_orgs.drop(columns=["cik"])
 
     # --- Feature Engineering on Orgs ---
     df_orgs = engineer_org_features(df_orgs, df_holdings)
@@ -633,53 +631,34 @@ def main(orgs_csv_path, holdings_csv_path, stocks_csv_path):
     # ENSURE CONSISTENT ONE-HOT ENCODING FOR SHARED COLUMNS
     ##############################################
     # Shared columns (stock id and filer_id) should be label-encoded (not one-hot encoded) along with keys (email and org id)
+    # These are strings that can be encoded as int to save space and work with downstream modeling (expect int ref).
+    # We also assume filer and stock ids are matching as they come from WhaleWatchers API which we assume is consistent.
     org_id_map = create_union_mapping(df_orgs, df_holdings, "org_id")
-    filer_id_map = create_union_mapping(df_orgs, df_holdings, "filer_id")
     email_ext_map = create_union_mapping(df_orgs, df_holdings, "email_extension")
-    stock_id_map = create_union_mapping(df_orgs, df_holdings, "stock_id")
 
     # Apply the mappings to both DataFrames, creating new encoded columns.
     df_orgs["org_id_encoded"] = df_orgs["org_id"].map(org_id_map)
     df_holdings["org_id_encoded"] = df_holdings["org_id"].map(org_id_map)
-
-    df_orgs["filer_id_encoded"] = df_orgs["filer_id"].map(filer_id_map)
-    df_holdings["filer_id_encoded"] = df_holdings["filer_id"].map(filer_id_map)
 
     df_orgs["email_extension_encoded"] = df_orgs["email_extension"].map(email_ext_map)
     df_holdings["email_extension_encoded"] = df_holdings["email_extension"].map(
         email_ext_map
     )
 
-    df_orgs["stock_id_encoded"] = df_orgs["stock_id"].map(stock_id_map)
-    df_holdings["stock_id_encoded"] = df_holdings["stock_id"].map(stock_id_map)
-
-    df_holdings = df_holdings.drop(
-        columns=["stock_id", "org_id", "email_extension", "filer_id"]
-    )
-    df_orgs = df_orgs.drop(
-        columns=["stock_id", "org_id", "email_extension", "filer_id"]
-    )
+    df_holdings = df_holdings.drop(columns=["org_id", "email_extension"])
+    df_orgs = df_orgs.drop(columns=["org_id", "email_extension"])
 
     # Save the mapping dictionaries to files in your raw folder.
     with open("guilherme/data/raw/org_id_map.pkl", "wb") as f:
         pickle.dump(org_id_map, f)
-    with open("guilherme/data/raw/filer_id_map.pkl", "wb") as f:
-        pickle.dump(filer_id_map, f)
     with open("guilherme/data/raw/email_extension_map.pkl", "wb") as f:
         pickle.dump(email_ext_map, f)
-    with open("guilherme/data/raw/stock_id_map.pkl", "wb") as f:
-        pickle.dump(stock_id_map, f)
-
-    """
-        with open("guilherme/data/raw/stock_id_map.pkl", "rb") as f:
-            stock_id_map = pickle.load(f)
-    """
 
     ##############################################
     # CUSTOM ENCODING & SCALING
     ##############################################
-    # Define key columns that should remain unchanged after encoding them
-    key_cols = ["org_id_encoded", "email_extension_encoded"]
+    # Define key columns that should remain unchanged after encoding them; stock_ticker and filer_id passed in for ease of reference downstream despite char
+    key_cols_passed = ["org_id_encoded", "email_extension_encoded", "stock_ticker", "filer_id"]
 
     # For Holdings:
     # Nominal columns to one-hot encode
@@ -712,9 +691,9 @@ def main(orgs_csv_path, holdings_csv_path, stocks_csv_path):
         onehot_cols=onehot_cols_holdings,
         ordinal_cols=ordinal_cols_holdings,
         numeric_override=numeric_cols_holdings,
-        key_cols=key_cols,
+        key_cols=key_cols_passed,
     )
-    holdings_output = os.path.splitext(holdings_csv_path)[0] + "_processed.csv"
+    holdings_output = "guilherme/data/processed/holdings_processed.csv"
     print("Going to take a while to scale holdings...")
     to_csv_with_progress(
         df_holdings_processed, holdings_output
@@ -735,12 +714,12 @@ def main(orgs_csv_path, holdings_csv_path, stocks_csv_path):
         onehot_cols=onehot_cols_org,
         ordinal_cols=ordinal_cols_org,
         numeric_override=numeric_cols_org,
-        key_cols=key_cols,
+        key_cols=key_cols_passed,
     )
 
     # bio is text
 
-    orgs_output = os.path.splitext(orgs_csv_path)[0] + "_processed.csv"
+    orgs_output = "guilherme/data/processed/orgs_processed.csv"
     to_csv_with_progress(df_orgs_processed, orgs_output)
 
     ##############################################

@@ -1,7 +1,7 @@
 import os
 import sys
 import argparse
-
+import gzip
 from utils import *
 from train_model import *
 
@@ -15,9 +15,6 @@ if __name__ == "__main__":
     # model setting
     parser.add_argument("--llm", type=str, default='opt', help='flan_t5, opt, vicuna')
     parser.add_argument("--recsys", type=str, default='sasrec')
-    
-    # dataset setting
-    parser.add_argument("--rec_pre_trained_data", type=str, default='Movies_and_TV')
     
     # train phase setting
     parser.add_argument("--pretrain_stage1", action='store_true', default=True)

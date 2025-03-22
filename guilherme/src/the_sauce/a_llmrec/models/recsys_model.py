@@ -13,11 +13,11 @@ from pre_train.sasrec.model import SASRec
 
 
 def load_checkpoint(recsys, pre_trained):
-    path = f'pre_train/{recsys}/{pre_trained}/'
+    path = "guilherme/experiments/"
     
     pth_file_path = find_filepath(path, '.pth')
     assert len(pth_file_path) == 1, 'There are more than two models in this dir. You need to remove other model files.\n'
-    kwargs, checkpoint = torch.load(pth_file_path[0], map_location="cpu")
+    kwargs, checkpoint = torch.load(pth_file_path[0], map_location="cpu", weights_only=False)
     logging.info("load checkpoint from %s" % pth_file_path[0])
 
     return kwargs, checkpoint
