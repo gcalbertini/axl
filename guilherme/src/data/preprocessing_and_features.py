@@ -5,8 +5,10 @@ from sklearn.preprocessing import StandardScaler
 import argparse
 import base64
 import webbrowser
-from IPython.display import HTML, display
+from IPython.display import HTML
 from tqdm import tqdm
+import pickle
+
 
 ##############################################
 # DATA LOADING & MISSING FIELD POPULATION
@@ -444,22 +446,42 @@ def generate_html_file(links_dict, html_filename="download_links.html"):
     print(f"HTML file with download links saved to {html_filename}")
     return os.path.abspath(html_filename)
 
+
 def to_csv_with_progress(df, filename, chunksize=256):
     """
     Write DataFrame to CSV in chunks, displaying progress with tqdm.
-    
+
     Parameters:
       df (DataFrame): The DataFrame to write.
       filename (str): Output CSV file path.
       chunksize (int): Number of rows to write per chunk.
     """
     n = len(df)
-    with open(filename, 'w', encoding='utf-8', newline='') as f:
+    print(f"df for {filename} has {n} rows")
+    with open(filename, "w", encoding="utf-8", newline="") as f:
         # Write header once.
         df.head(0).to_csv(f, index=False)
         # Write the DataFrame in chunks.
         for i in tqdm(range(0, n, chunksize), desc="Writing CSV"):
-            df.iloc[i:i+chunksize].to_csv(f, index=False, header=False)
+            df.iloc[i : i + chunksize].to_csv(f, index=False, header=False)
+
+
+def create_union_mapping(df1, df2, col):
+    """
+    Create a mapping dictionary for a column based on the union of unique values from two DataFrames.
+
+    Parameters:
+    df1, df2 (DataFrame): The DataFrames to consider.
+    col (str): The column name to compute the union for.
+
+    Returns:
+    mapping (dict): A dictionary mapping each unique value to a unique integer.
+    """
+    union_values = sorted(
+        set(df1[col].dropna().unique()).union(set(df2[col].dropna().unique()))
+    )
+    mapping = {val: idx for idx, val in enumerate(union_values)}
+    return mapping
 
 
 ##############################################
@@ -485,10 +507,6 @@ def main(orgs_csv_path, holdings_csv_path, stocks_csv_path):
          - Drop unnecessary columns.
       5. Feature Engineering on Orgs.
       6. Consistent Encoding & Scaling:
-         - For holdings, one-hot encode shared columns (including stock_id, filer_id, stock_ticker)
-           and other nominal columns, ordinal encode ranking columns, and scale numeric features.
-         - For orgs, one-hot encode 'org_type' plus shared columns (stock_id, filer_id, stock_ticker)
-           using consistent categories.
          - The key columns that remain unchanged are org_id and email_extension.
       7. Generate HTML download links for the processed CSV files and open them in the default browser.
     """
@@ -614,35 +632,58 @@ def main(orgs_csv_path, holdings_csv_path, stocks_csv_path):
     ##############################################
     # ENSURE CONSISTENT ONE-HOT ENCODING FOR SHARED COLUMNS
     ##############################################
-    # Shared categorical columns to be one-hot encoded consistently:
-    shared_cats = ["stock_id", "filer_id"]
-    union_categories = {}
-    for col in shared_cats:
-        # Compute the union of unique values from both DataFrames.
-        vals_holdings = pd.Index(df_holdings[col].dropna().unique())
-        vals_orgs = pd.Index(df_orgs[col].dropna().unique())
-        union_categories[col] = sorted(vals_holdings.union(vals_orgs).tolist())
+    # Shared columns (stock id and filer_id) should be label-encoded (not one-hot encoded) along with keys (email and org id)
+    org_id_map = create_union_mapping(df_orgs, df_holdings, "org_id")
+    filer_id_map = create_union_mapping(df_orgs, df_holdings, "filer_id")
+    email_ext_map = create_union_mapping(df_orgs, df_holdings, "email_extension")
+    stock_id_map = create_union_mapping(df_orgs, df_holdings, "stock_id")
 
-    # Convert the shared columns in both DataFrames to categorical with the union of categories.
-    for col in shared_cats:
-        if col in df_holdings.columns:
-            df_holdings[col] = pd.Categorical(
-                df_holdings[col], categories=union_categories[col]
-            )
-        if col in df_orgs.columns:
-            df_orgs[col] = pd.Categorical(
-                df_orgs[col], categories=union_categories[col]
-            )
+    # Apply the mappings to both DataFrames, creating new encoded columns.
+    df_orgs["org_id_encoded"] = df_orgs["org_id"].map(org_id_map)
+    df_holdings["org_id_encoded"] = df_holdings["org_id"].map(org_id_map)
+
+    df_orgs["filer_id_encoded"] = df_orgs["filer_id"].map(filer_id_map)
+    df_holdings["filer_id_encoded"] = df_holdings["filer_id"].map(filer_id_map)
+
+    df_orgs["email_extension_encoded"] = df_orgs["email_extension"].map(email_ext_map)
+    df_holdings["email_extension_encoded"] = df_holdings["email_extension"].map(
+        email_ext_map
+    )
+
+    df_orgs["stock_id_encoded"] = df_orgs["stock_id"].map(stock_id_map)
+    df_holdings["stock_id_encoded"] = df_holdings["stock_id"].map(stock_id_map)
+
+    df_holdings = df_holdings.drop(
+        columns=["stock_id", "org_id", "email_extension", "filer_id"]
+    )
+    df_orgs = df_orgs.drop(
+        columns=["stock_id", "org_id", "email_extension", "filer_id"]
+    )
+
+    # Save the mapping dictionaries to files in your raw folder.
+    with open("guilherme/data/raw/org_id_map.pkl", "wb") as f:
+        pickle.dump(org_id_map, f)
+    with open("guilherme/data/raw/filer_id_map.pkl", "wb") as f:
+        pickle.dump(filer_id_map, f)
+    with open("guilherme/data/raw/email_extension_map.pkl", "wb") as f:
+        pickle.dump(email_ext_map, f)
+    with open("guilherme/data/raw/stock_id_map.pkl", "wb") as f:
+        pickle.dump(stock_id_map, f)
+
+    """
+        with open("guilherme/data/raw/stock_id_map.pkl", "rb") as f:
+            stock_id_map = pickle.load(f)
+    """
 
     ##############################################
     # CUSTOM ENCODING & SCALING
     ##############################################
-    # Define key columns that should remain unchanged.
-    key_cols = ["org_id", "email_extension"]
+    # Define key columns that should remain unchanged after encoding them
+    key_cols = ["org_id_encoded", "email_extension_encoded"]
 
     # For Holdings:
-    # Nominal columns to one-hot encode: shared columns + security_type, sector, industry.
-    onehot_cols_holdings = shared_cats + ["security_type", "sector", "industry"]
+    # Nominal columns to one-hot encode
+    onehot_cols_holdings = ["security_type", "sector", "industry"]
     # Ordinal encoding for ranking columns.
     ordinal_cols_holdings = [
         "current_ranking",
@@ -675,12 +716,13 @@ def main(orgs_csv_path, holdings_csv_path, stocks_csv_path):
     )
     holdings_output = os.path.splitext(holdings_csv_path)[0] + "_processed.csv"
     print("Going to take a while to scale holdings...")
-    to_csv_with_progress(df_holdings_processed, holdings_output)  # THIS MAY BE GINORMOUS
+    to_csv_with_progress(
+        df_holdings_processed, holdings_output
+    )  # THIS MAY BE GINORMOUS
     print("Scaled holdings and CSV writing completed.")
 
     # For Orgs:
-    # One-hot encode shared categorical columns and 'org_type'.
-    onehot_cols_org = shared_cats + ["org_type", "most_invested_sector"]
+    onehot_cols_org = ["org_type", "most_invested_sector"]
     ordinal_cols_org = []  # No ordinal encoding for orgs.
     numeric_cols_org = [
         "num_holdings",

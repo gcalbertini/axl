@@ -1,5 +1,6 @@
 import sys
 import copy
+import pandas as pd
 import torch
 import random
 import numpy as np
@@ -10,7 +11,7 @@ from datetime import datetime
 from pytz import timezone
 from torch.utils.data import Dataset
 
-    
+
 # sampler for batch generation
 def random_neq(l, r, s):
     t = np.random.randint(l, r)
@@ -19,11 +20,14 @@ def random_neq(l, r, s):
     return t
 
 
-def sample_function(user_train, usernum, itemnum, batch_size, maxlen, result_queue, SEED):
+def sample_function(
+    user_train, usernum, itemnum, batch_size, maxlen, result_queue, SEED
+):
     def sample():
 
         user = np.random.randint(1, usernum + 1)
-        while len(user_train[user]) <= 1: user = np.random.randint(1, usernum + 1)
+        while len(user_train[user]) <= 1:
+            user = np.random.randint(1, usernum + 1)
 
         seq = np.zeros([maxlen], dtype=np.int32)
         pos = np.zeros([maxlen], dtype=np.int32)
@@ -35,10 +39,12 @@ def sample_function(user_train, usernum, itemnum, batch_size, maxlen, result_que
         for i in reversed(user_train[user][:-1]):
             seq[idx] = i
             pos[idx] = nxt
-            if nxt != 0: neg[idx] = random_neq(1, itemnum + 1, ts)
+            if nxt != 0:
+                neg[idx] = random_neq(1, itemnum + 1, ts)
             nxt = i
             idx -= 1
-            if idx == -1: break
+            if idx == -1:
+                break
 
         return (user, seq, pos, neg)
 
@@ -57,14 +63,19 @@ class WarpSampler(object):
         self.processors = []
         for i in range(n_workers):
             self.processors.append(
-                Process(target=sample_function, args=(User,
-                                                      usernum,
-                                                      itemnum,
-                                                      batch_size,
-                                                      maxlen,
-                                                      self.result_queue,
-                                                      np.random.randint(2e9)
-                                                      )))
+                Process(
+                    target=sample_function,
+                    args=(
+                        User,
+                        usernum,
+                        itemnum,
+                        batch_size,
+                        maxlen,
+                        self.result_queue,
+                        np.random.randint(2e9),
+                    ),
+                )
+            )
             self.processors[-1].daemon = True
             self.processors[-1].start()
 
@@ -76,42 +87,45 @@ class WarpSampler(object):
             p.terminate()
             p.join()
 
+
 # DataSet for ddp
 class SeqDataset(Dataset):
-    def __init__(self, user_train, num_user, num_item, max_len): 
+    def __init__(self, user_train, num_user, num_item, max_len):
         self.user_train = user_train
         self.num_user = num_user
         self.num_item = num_item
         self.max_len = max_len
         print("Initializing with num_user:", num_user)
 
-        
     def __len__(self):
         return self.num_user
-        
+
     def __getitem__(self, idx):
         user_id = idx + 1
         seq = np.zeros([self.max_len], dtype=np.int32)
         pos = np.zeros([self.max_len], dtype=np.int32)
         neg = np.zeros([self.max_len], dtype=np.int32)
-    
+
         nxt = self.user_train[user_id][-1]
         length_idx = self.max_len - 1
-        
+
         # user의 seq set
         ts = set(self.user_train[user_id])
         for i in reversed(self.user_train[user_id][:-1]):
             seq[length_idx] = i
             pos[length_idx] = nxt
-            if nxt != 0: neg[length_idx] = random_neq(1, self.num_item + 1, ts)
+            if nxt != 0:
+                neg[length_idx] = random_neq(1, self.num_item + 1, ts)
             nxt = i
             length_idx -= 1
-            if length_idx == -1: break
+            if length_idx == -1:
+                break
 
         return user_id, seq, pos, neg
 
+
 class SeqDataset_Inference(Dataset):
-    def __init__(self, user_train, user_valid, user_test,use_user, num_item, max_len): 
+    def __init__(self, user_train, user_valid, user_test, use_user, num_item, max_len):
         self.user_train = user_train
         self.user_valid = user_valid
         self.user_test = user_test
@@ -121,53 +135,85 @@ class SeqDataset_Inference(Dataset):
         self.use_user = use_user
         print("Initializing with num_user:", self.num_user)
 
-        
     def __len__(self):
         return self.num_user
-        
+
     def __getitem__(self, idx):
         user_id = self.use_user[idx]
         seq = np.zeros([self.max_len], dtype=np.int32)
-        idx = self.max_len -1
+        idx = self.max_len - 1
         seq[idx] = self.user_valid[user_id][0]
-        idx -=1
+        idx -= 1
         for i in reversed(self.user_train[user_id]):
             seq[idx] = i
-            idx -=1
-            if idx ==-1: break
+            idx -= 1
+            if idx == -1:
+                break
         rated = set(self.user_train[user_id])
         rated.add(0)
         pos = self.user_test[user_id][0]
         neg = []
         for _ in range(3):
-            t = np.random.randint(1,self.num_item+1)
-            while t in rated: t = np.random.randint(1,self.num_item+1)
+            t = np.random.randint(1, self.num_item + 1)
+            while t in rated:
+                t = np.random.randint(1, self.num_item + 1)
             neg.append(t)
         neg = np.array(neg)
         return user_id, seq, pos, neg
+
+
 # train/val/test data generation
-def data_partition(fname, path=None):
+def data_partition(path=None):
+    """
+    Partition interaction data (from a text file) into training, validation, and test sets.
+
+    The text file is assumed to have one interaction per line in the format:
+        org_id stock_id
+    (with a space as the delimiter). Each org_id may appear in multiple lines.
+
+    For each organization:
+      - If the total number of interactions is less than 3, all interactions are used for training.
+      - Otherwise:
+            training = all interactions except the last two,
+            validation = the second-to-last interaction,
+            test = the last interaction.
+
+    Also computes:
+      - usernum: The maximum org_id (assuming org_ids start at 1).
+      - itemnum: The maximum stock_id encountered.
+
+    Parameters:
+      path (str, optional): Full path to the interactions file.
+
+    Returns:
+      list: [user_train, user_valid, user_test, usernum, itemnum]
+          where:
+            - user_train is a dict mapping org_id to its training interactions.
+            - user_valid is a dict mapping org_id to its validation interaction (as a single-item list).
+            - user_test  is a dict mapping org_id to its test interaction (as a single-item list).
+            - usernum is the total number of organizations.
+            - itemnum is the maximum stock_id encountered.
+    """
     usernum = 0
     itemnum = 0
     User = defaultdict(list)
     user_train = {}
     user_valid = {}
     user_test = {}
-    # assume user/item index starting from 1
-    
-    # f = open('./pre_train/sasrec/data/%s.txt' % fname, 'r')
-    if path == None:
-        f = open('../../data/amazon/%s.txt' % fname, 'r')
-    else:
-        f = open(path, 'r')
-    for line in f:
-        u, i = line.rstrip().split(' ')
-        u = int(u)
-        i = int(i)
-        usernum = max(u, usernum)
-        itemnum = max(i, itemnum)
-        User[u].append(i)
 
+    # Use provided path, or default to the holdings folder.
+    file_path = path if path is not None else f"guilherme/data/processed/df_seq.txt"
+
+    with open(file_path, "r") as f:
+        for line in f:
+            u, i = line.rstrip().split(" ")
+            u = int(u)
+            i = int(i)
+            usernum = max(u, usernum)
+            itemnum = max(i, itemnum)
+            User[u].append(i)
+
+    # Partition each user's interaction sequence.
     for user in User:
         nfeedback = len(User[user])
         if nfeedback < 3:
@@ -176,11 +222,11 @@ def data_partition(fname, path=None):
             user_test[user] = []
         else:
             user_train[user] = User[user][:-2]
-            user_valid[user] = []
-            user_valid[user].append(User[user][-2])
-            user_test[user] = []
-            user_test[user].append(User[user][-1])
+            user_valid[user] = [User[user][-2]]
+            user_test[user] = [User[user][-1]]
+
     return [user_train, user_valid, user_test, usernum, itemnum]
+
 
 # TODO: merge evaluate functions for test and val set
 # evaluate on test set
@@ -191,13 +237,14 @@ def evaluate(model, dataset, args):
     HT = 0.0
     valid_user = 0.0
 
-    if usernum>10000:
+    if usernum > 10000:
         users = random.sample(range(1, usernum + 1), 10000)
     else:
         users = range(1, usernum + 1)
     for u in users:
 
-        if len(train[u]) < 1 or len(test[u]) < 1: continue
+        if len(train[u]) < 1 or len(test[u]) < 1:
+            continue
 
         seq = np.zeros([args.maxlen], dtype=np.int32)
         idx = args.maxlen - 1
@@ -206,17 +253,19 @@ def evaluate(model, dataset, args):
         for i in reversed(train[u]):
             seq[idx] = i
             idx -= 1
-            if idx == -1: break
+            if idx == -1:
+                break
         rated = set(train[u])
         rated.add(0)
         item_idx = [test[u][0]]
         for _ in range(19):
             t = np.random.randint(1, itemnum + 1)
-            while t in rated: t = np.random.randint(1, itemnum + 1)
+            while t in rated:
+                t = np.random.randint(1, itemnum + 1)
             item_idx.append(t)
 
         predictions = -model.predict(*[np.array(l) for l in [[u], [seq], item_idx]])
-        predictions = predictions[0] # - for 1st argsort DESC
+        predictions = predictions[0]  # - for 1st argsort DESC
 
         rank = predictions.argsort().argsort()[0].item()
 
@@ -226,7 +275,7 @@ def evaluate(model, dataset, args):
             NDCG += 1 / np.log2(rank + 2)
             HT += 1
         if valid_user % 100 == 0:
-            print('.', end="")
+            print(".", end="")
             sys.stdout.flush()
 
     return NDCG / valid_user, HT / valid_user
@@ -239,28 +288,31 @@ def evaluate_valid(model, dataset, args):
     NDCG = 0.0
     valid_user = 0.0
     HT = 0.0
-    if usernum>10000:
+    if usernum > 10000:
         users = random.sample(range(1, usernum + 1), 10000)
     else:
         users = range(1, usernum + 1)
-        
+
     for u in users:
-        if len(train[u]) < 1 or len(valid[u]) < 1: continue
+        if len(train[u]) < 1 or len(valid[u]) < 1:
+            continue
 
         seq = np.zeros([args.maxlen], dtype=np.int32)
         idx = args.maxlen - 1
         for i in reversed(train[u]):
             seq[idx] = i
             idx -= 1
-            if idx == -1: break
+            if idx == -1:
+                break
 
         rated = set(train[u])
         rated.add(0)
         item_idx = [valid[u][0]]
-        
+
         for _ in range(100):
             t = np.random.randint(1, itemnum + 1)
-            while t in rated: t = np.random.randint(1, itemnum + 1)
+            while t in rated:
+                t = np.random.randint(1, itemnum + 1)
             item_idx.append(t)
 
         predictions = -model.predict(*[np.array(l) for l in [[u], [seq], item_idx]])
@@ -273,6 +325,6 @@ def evaluate_valid(model, dataset, args):
             NDCG += 1 / np.log2(rank + 2)
             HT += 1
         if valid_user % 100 == 0:
-            print('.', end="")
+            print(".", end="")
             sys.stdout.flush()
     return NDCG / valid_user, HT / valid_user
