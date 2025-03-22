@@ -5,8 +5,6 @@ import argparse
 from utils import *
 from train_model import *
 
-from pre_train.sasrec.data_preprocess import preprocess
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     
@@ -22,7 +20,7 @@ if __name__ == "__main__":
     parser.add_argument("--rec_pre_trained_data", type=str, default='Movies_and_TV')
     
     # train phase setting
-    parser.add_argument("--pretrain_stage1", action='store_true')
+    parser.add_argument("--pretrain_stage1", action='store_true', default=True)
     parser.add_argument("--pretrain_stage2", action='store_true')
     parser.add_argument("--inference", action='store_true')
     

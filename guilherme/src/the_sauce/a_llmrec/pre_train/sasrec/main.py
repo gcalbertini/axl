@@ -252,7 +252,7 @@ parser.add_argument("--num_epochs", default=200, type=int)
 parser.add_argument("--num_heads", default=1, type=int)
 parser.add_argument("--dropout_rate", default=0.5, type=float)
 parser.add_argument("--l2_emb", default=0.0, type=float)
-parser.add_argument("--device", default="cpu", type=str)
+parser.add_argument("--device", default=torch.device("cuda" if torch.cuda.is_available() else "cpu"), type=str)
 parser.add_argument("--inference_only", default=False, action="store_true")
 parser.add_argument("--state_dict_path", default=None, type=str)
 parser.add_argument(
@@ -379,7 +379,7 @@ if __name__ == "__main__":
             model.train()
 
         if epoch == args.num_epochs:
-            folder = args.dataset
+            folder = "guilherme/experiments/"
             fname = (
                 "SASRec.epoch={}.lr={}.layer={}.head={}.hidden={}.maxlen={}.pth".format(
                     args.num_epochs,
