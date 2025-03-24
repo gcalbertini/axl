@@ -417,7 +417,7 @@ if __name__ == "__main__":
     """
 
     # --- Training Loop ---
-    for epoch in tqdm(range(epoch_start_idx, args.num_epochs + 1), dynamic_ncols=True):
+    for epoch in tqdm(range(epoch_start_idx, args.num_epochs), dynamic_ncols=True):
         if args.inference_only:
             break
         for step in range(num_batch):

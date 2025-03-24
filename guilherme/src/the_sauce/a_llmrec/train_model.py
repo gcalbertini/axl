@@ -126,7 +126,7 @@ def train_model_phase2_(rank, world_size, args):
     random.seed(0)
 
     model = A_llmrec_model(args).to(args.device)
-    phase1_epoch = 10
+    phase1_epoch = 150
     model.load_model(args, phase1_epoch=phase1_epoch)
 
     dataset = data_partition("guilherme/data/processed/sequences.txt")

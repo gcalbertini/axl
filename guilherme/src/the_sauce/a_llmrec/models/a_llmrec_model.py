@@ -293,7 +293,9 @@ class A_llmrec_model(nn.Module):
         text_rc_loss = 0
 
         # Use tqdm to wrap the iteration for a nice progress bar.
-        for i in tqdm(range(num_iters), desc="Phase1 iterations", leave=False, dynamic_ncols=True):
+        for i in tqdm(
+            range(num_iters), desc="Phase1 iterations", leave=False, dynamic_ncols=True
+        ):
             start_inx = i * batch_size
             end_inx = min(start_inx + batch_size, len(log_emb_))
 
@@ -386,7 +388,7 @@ class A_llmrec_model(nn.Module):
             "Epoch {}/{} Iteration {}/{}: Mean loss: {:.4f} / BPR loss: {:.4f} / Matching loss: {:.4f} / "
             "Item reconstruction: {:.4f} / Text reconstruction: {:.4f}".format(
                 epoch,
-                total_epoch,
+                total_epoch - 1,  # BUG off-by-one in input despite correct processing
                 step,
                 total_step,
                 avg_mean_loss,
@@ -394,7 +396,7 @@ class A_llmrec_model(nn.Module):
                 avg_gt_loss,
                 avg_rc_loss,
                 avg_text_rc_loss,
-            )
+            ),
         )
 
     def make_interact_text(self, interact_ids, interact_max_num):
@@ -489,7 +491,9 @@ class A_llmrec_model(nn.Module):
 
         # We'll process each user (each row in u) one by one.
         num_users = len(u)
-        for i in tqdm(range(num_users), desc="Phase2 iterations", leave=False, dynamic_ncols=True):
+        for i in tqdm(
+            range(num_users), desc="Phase2 iterations", leave=False, dynamic_ncols=True
+        ):
             # For each user, use the last positive stock as the target.
             target_item_id = pos[i][-1]
             target_item_title = self.find_item_text_single(
@@ -507,10 +511,10 @@ class A_llmrec_model(nn.Module):
             )
 
             # Build the input prompt for the language model.
-            input_text = " is a user representation. "
+            input_text = " is a user (investor) representation. "
             # Domain-specific prompt for stocks.
-            input_text += "This investor has held " + interact_text
-            input_text += " in the past. Recommend one next stock for this investor to invest in from the following stock ticker set, "
+            input_text += "This user (investor) has held " + interact_text
+            input_text += " in the past. Recommend one next item (stock) for this user (investor) to target from the following stock ticker set, "
             input_text += candidate_text + ". The recommendation is "
 
             text_input.append(input_text)
@@ -537,42 +541,49 @@ class A_llmrec_model(nn.Module):
         loss_rm.backward()
         optimizer.step()
 
-        total_loss_acc += loss_rm.item()
-
-        avg_loss = total_loss_acc / num_users
+        '''
+        NOTE I guess this is intention as batch size was small since you run out of vram for this phase > 16 on even 1x A100?
+        In this Phase 2 implementation, the loss is computed for the entire batch in a single
+        forward pass rather than accumulating losses over multiple mini-batches. In other words,
+        instead of summing loss values over several iterations and then dividing by the number of iterations
+        (as in Phase 1), the function calls the LLM once over the whole batch to obtain a single loss value (loss_rm). 
+        This loss value is then used directly (and added to mean_loss) without dividing by the number of iterations.
+        If it was intended to average the loss per user, you would need to divide by the number of users (i.e. len(u))—but as
+        implemented, loss_rm represents the aggregate loss over the *entire* batch.
+        '''
+        mean_loss += loss_rm.item() / len(u) # TODO may be too small for several users and won't display well ~0
 
         # Output the loss summary using tqdm.write for clean integration with the progress bar.
         tqdm.write(
-            "A-LLMRec model loss in epoch {}/{} iteration {}/{}: {:.4f}".format(
-                epoch, total_epoch, step, total_step, avg_loss
-            )
+            "A-LLMRec model loss in epoch {}/{} iteration {}/{}: {:.5f}".format(
+                epoch, total_epoch - 1, step, total_step, mean_loss
+            ),
         )
-
 
     def generate(self, data):
         """
         Generate recommendations using the A-LLMRec model for our stock recommendation problem.
-        
+
         In our setting:
         - Each investor (user) is represented by historical interaction data with stocks.
         - Positive instances are the stocks the investor holds.
         - Negative instances are sampled stocks that the investor does not hold.
-        
+
         This function builds a textual prompt that summarizes the investor's past stock interactions
         and then asks the language model (LLM) to generate a recommendation based on a candidate set
         of stock tickers. The text prompt, embeddings from collaborative filtering, and the text
         representations from SBERT are combined to compute a loss that aligns these representations.
-        
+
         The process is:
         1. Obtain CF embeddings (log_emb) using the recsys model in "log_only" mode.
         2. For each investor in the batch, construct:
             - A text summary of historical stock interactions (interact_text).
             - A candidate set of stock tickers (candidate_text).
             - An input prompt that instructs the LLM to recommend a next stock.
-        3. Convert the text prompt to embeddings via the LLM's tokenizer and replace tokens with the 
+        3. Convert the text prompt to embeddings via the LLM's tokenizer and replace tokens with the
             projected collaborative filtering and candidate embeddings.
         4. Generate output text from the LLM and write the prompt, target answer, and LLM output to a file.
-        
+
         Parameters:
             data: A tuple (u, seq, pos, neg, rank) where:
                 - u: User representation tensor.
@@ -582,12 +593,12 @@ class A_llmrec_model(nn.Module):
                 - rank: Ranking information (if used).
             optimizer: The optimizer used for updating model parameters.
             batch_iter: A tuple (epoch, total_epoch, step, total_step) for logging.
-        
+
         Returns:
             A list of generated recommendation stocks.
         """
         u, seq, pos, neg, _ = data
-       
+
         answer = []
         text_input = []
         interact_embs = []
@@ -602,7 +613,12 @@ class A_llmrec_model(nn.Module):
             log_emb = self.recsys.model(u, seq, pos, neg, mode="log_only")
 
             # Process each investor (each row in u) with a progress bar.
-            for i in tqdm(range(len(u)), desc="Generating recommendations", dynamic_ncols=True, leave=False):
+            for i in tqdm(
+                range(len(u)),
+                desc="Generating recommendations",
+                dynamic_ncols=True,
+                leave=False,
+            ):
                 # Use the last positive interaction as the target stock.
                 target_item_id = pos[i][-1]
                 target_item_title = self.find_item_text_single(
@@ -610,7 +626,9 @@ class A_llmrec_model(nn.Module):
                 )
 
                 # Construct a textual summary of the investor's historical stock interactions.
-                interact_text, interact_ids = self.make_interact_text(seq[i][seq[i] > 0], 10)
+                interact_text, interact_ids = self.make_interact_text(
+                    seq[i][seq[i] > 0], 10
+                )
                 candidate_num = 20
                 # Generate candidate stock set and corresponding text prompt.
                 candidate_text, candidate_ids = self.make_candidate_text(
@@ -628,8 +646,12 @@ class A_llmrec_model(nn.Module):
                 answer.append(target_item_title)
 
                 # Project the investor's historical and candidate item IDs into embedding space.
-                interact_embs.append(self.item_emb_proj(self.get_item_emb(interact_ids)))
-                candidate_embs.append(self.item_emb_proj(self.get_item_emb(candidate_ids)))
+                interact_embs.append(
+                    self.item_emb_proj(self.get_item_emb(interact_ids))
+                )
+                candidate_embs.append(
+                    self.item_emb_proj(self.get_item_emb(candidate_ids))
+                )
 
         # Project the collaborative filtering embeddings.
         log_emb = self.log_emb_proj(log_emb)
