@@ -1,16 +1,64 @@
 import random
 import pickle
-
+import math
 import torch
 from torch.cuda.amp import autocast as autocast
 import torch.nn as nn
 import numpy as np
-
+from tqdm import tqdm
 from models.recsys_model import *
 from models.llm4rec import *
 from sentence_transformers import SentenceTransformer
 import gzip
-import json
+
+"""
+NOTE Losses and Their Roles
+
+Our overall goal is to build a recommender system that learns to rank the 
+stocks (and their textual content such as bios and tickers) in a way that reflects
+the investor's true interests. To achieve this, we use several losses that work together:
+
+    Binary Cross-Entropy (BCE) Loss for Ranking (BPR Loss):
+
+        What It Does:
+        This loss compares the predicted scores for positive and negative instances.
+
+        Why It's Used:
+        It forces the model to assign higher scores to the positive (held) 
+        stocks and lower scores to the negatives. Essentially, it trains the model to 
+        correctly distinguish between stocks an investor actually holds versus those they do not.
+
+    Matching Loss (MSE Loss):
+
+        What It Does:
+        After projecting the collaborative filtering (interaction-based) embeddings 
+        and the text-based embeddings (derived from stock bios and tickers via SBERT) through separate MLPs, 
+        we compute the mean squared error (MSE) between these projections.
+
+        Why It's Used:
+        This loss encourages the two types of embeddings to align. 
+        The idea is that the latent representation learned from the investment 
+        interactions should be consistent with the content-based representation 
+        derived from stock bios/tickers. When these match well, the model can 
+        better capture the underlying semantics of the investor's interests.
+
+    Reconstruction Losses (MSE Loss):
+
+        Item Reconstruction Loss:
+        Measures the difference between the original collaborative filtering embeddings
+        and their MLP-transformed versions.
+
+        Text Reconstruction Loss:
+        Measures the difference between the original SBERT text 
+        embeddings and their projected representations.
+
+        Why They're Used:
+        These losses ensure that the transformations applied by 
+        the MLPs do not distort the original information too much. 
+        They help in preserving the meaningful structure of the original 
+        embeddings while still allowing the model to align and fuse 
+        the collaborative and content information.
+"""
 
 
 class two_layer_mlp(nn.Module):
@@ -172,49 +220,96 @@ class A_llmrec_model(nn.Module):
             self.generate(data)
 
     def pre_train_phase1(self, data, optimizer, batch_iter):
+        """
+        Pre-train Phase 1 for the A-LLMRec model.
+
+        In our recommendation problem, this phase trains the collaborative filtering
+        and text alignment components. We first obtain item embeddings from our recsys
+        model, then iterate in batches to:
+        - Generate text representations of positive and negative items via SBERT.
+        - Project the recsys embeddings and text embeddings through separate MLPs.
+        - Compute a binary cross-entropy (BCE) loss for ranking (BPR loss),
+            an MSE-based matching loss to align the embeddings,
+            and reconstruction losses.
+        - Backpropagate and update the model.
+
+        Positive Instances:
+        These are the items (stocks) that an investment entity actually
+        holds or has interacted with. In our data (e.g., from the 13F filings),
+        a positive instance is a stock that is present in an investor's portfolio.
+        For example, if an institutional investor holds shares of Company X, then Company X
+        is a positive instance for that investor.
+
+        Negative Instances:
+        These are items that the investment entity does not hold.
+        In training the model, negative instances are usually sampled at random
+        from the set of all stocks—ensuring that they are not in the investor's historical holdings.
+        The model learns to assign lower relevance scores to these
+        negative instances compared to the positive ones.
+
+        Parameters:
+            data: a tuple (u, seq, pos, neg) where:
+                - u: user representation tensor.
+                - seq: sequences (historical interactions).
+                - pos: positive item interactions.
+                - neg: negative item interactions.
+            optimizer: The optimizer used to update model parameters.
+            batch_iter: A tuple (epoch, total_epoch, step, total_step) providing context for logging.
+        """
+        # Unpack batch_iter context
         epoch, total_epoch, step, total_step = batch_iter
 
+        # Set the SBERT model to training mode
         self.sbert.train()
         optimizer.zero_grad()
 
+        # Unpack input data: u, sequence, positive and negative items.
         u, seq, pos, neg = data
+        # Compute indices: for each user, pick the index corresponding to the last item in their sequence.
         indices = [self.maxlen * (i + 1) - 1 for i in range(u.shape[0])]
 
-        # This returns the item embeddings learned solely from interaction data.
+        # Get initial item embeddings (log_emb) from the recsys model;
+        # these embeddings come solely from interaction data.
         with torch.no_grad():
             log_emb, pos_emb, neg_emb = self.recsys.model(u, seq, pos, neg, mode="item")
 
+        # Select embeddings corresponding to the last item in each sequence.
         log_emb_ = log_emb[indices]
         pos_emb_ = pos_emb[indices]
         neg_emb_ = neg_emb[indices]
+        # Reshape positive and negative item tensors accordingly.
         pos_ = pos.reshape(pos.size)[indices]
         neg_ = neg.reshape(neg.size)[indices]
 
-        start_inx = 0
-        end_inx = 60
-        iterss = 0
+        # Define the batch size and calculate the number of iterations.
+        batch_size = 60
+        num_iters = math.ceil(len(log_emb_) / batch_size)
+
+        # Initialize loss accumulators.
         mean_loss = 0
         bpr_loss = 0
         gt_loss = 0
         rc_loss = 0
         text_rc_loss = 0
-        original_loss = 0
-        while start_inx < len(log_emb_):
-            log_emb = log_emb_[start_inx:end_inx]
-            pos_emb = pos_emb_[start_inx:end_inx]
-            neg_emb = neg_emb_[start_inx:end_inx]
 
-            pos__ = pos_[start_inx:end_inx]
-            neg__ = neg_[start_inx:end_inx]
+        # Use tqdm to wrap the iteration for a nice progress bar.
+        for i in tqdm(range(num_iters), desc="Phase1 iterations", leave=False, dynamic_ncols=True):
+            start_inx = i * batch_size
+            end_inx = min(start_inx + batch_size, len(log_emb_))
 
-            start_inx = end_inx
-            end_inx += 60
-            iterss += 1
+            # Extract the current mini-batch.
+            log_emb_batch = log_emb_[start_inx:end_inx]
+            pos_emb_batch = pos_emb_[start_inx:end_inx]
+            neg_emb_batch = neg_emb_[start_inx:end_inx]
+            pos_batch = pos_[start_inx:end_inx]
+            neg_batch = neg_[start_inx:end_inx]
 
-            # You then get text representations by calling:
-            pos_text = self.find_item_text(pos__)
-            neg_text = self.find_item_text(neg__)
+            # Obtain text representations of the positive and negative items.
+            # These functions retrieve the item title (stock id for ticker) and bio to form a text description.
+            pos_text = self.find_item_text(pos_batch)
+            neg_text = self.find_item_text(neg_batch)
 
+            # Tokenize and embed positive text using SBERT.
             pos_token = self.sbert.tokenize(pos_text)
             pos_text_embedding = self.sbert(
                 {
@@ -222,6 +317,8 @@ class A_llmrec_model(nn.Module):
                     "attention_mask": pos_token["attention_mask"].to(self.device),
                 }
             )["sentence_embedding"]
+
+            # Tokenize and embed negative text using SBERT.
             neg_token = self.sbert.tokenize(neg_text)
             neg_text_embedding = self.sbert(
                 {
@@ -230,37 +327,37 @@ class A_llmrec_model(nn.Module):
                 }
             )["sentence_embedding"]
 
-            # The recsys embeddings (from pos_emb, neg_emb) are then passed through an MLP (self.mlp)
-            # to get a projected representation. Simultaneously, the text embeddings from sbert are
-            # passed through a separate MLP (self.mlp2). The model then computes a matching loss (via MSELoss) between
-            # these two sets of representations; This matching loss forces the collaborative embeddings to be aligned
-            # with the content (text) features, effectively enriching the representations.
-            pos_text_matching, pos_proj = self.mlp(pos_emb)
-            neg_text_matching, neg_proj = self.mlp(neg_emb)
-
+            # Project recsys embeddings through MLP to obtain a new representation.
+            pos_text_matching, pos_proj = self.mlp(pos_emb_batch)
+            neg_text_matching, neg_proj = self.mlp(neg_emb_batch)
+            # Similarly, project text embeddings via a second MLP.
             pos_text_matching_text, pos_text_proj = self.mlp2(pos_text_embedding)
             neg_text_matching_text, neg_text_proj = self.mlp2(neg_text_embedding)
 
-            pos_logits, neg_logits = (log_emb * pos_proj).mean(axis=1), (
-                log_emb * neg_proj
-            ).mean(axis=1)
-            pos_labels, neg_labels = torch.ones(
-                pos_logits.shape, device=pos_logits.device
-            ), torch.zeros(neg_logits.shape, device=pos_logits.device)
+            # Compute dot-product based logits between the log_emb_batch and projected embeddings.
+            pos_logits = (log_emb_batch * pos_proj).mean(axis=1)
+            neg_logits = (log_emb_batch * neg_proj).mean(axis=1)
+            # Create target labels for positive (1) and negative (0) interactions.
+            pos_labels = torch.ones(pos_logits.shape, device=pos_logits.device)
+            neg_labels = torch.zeros(neg_logits.shape, device=pos_logits.device)
 
-            loss = self.bce_criterion(pos_logits, pos_labels)
-            loss += self.bce_criterion(neg_logits, neg_labels)
-
+            # Calculate the binary cross-entropy loss for ranking (BPR loss).
+            loss = self.bce_criterion(pos_logits, pos_labels) + self.bce_criterion(
+                neg_logits, neg_labels
+            )
+            # Matching loss aligns the recsys MLP output with text MLP output.
             matching_loss = self.mse(
                 pos_text_matching, pos_text_matching_text
             ) + self.mse(neg_text_matching, neg_text_matching_text)
-            reconstruction_loss = self.mse(pos_proj, pos_emb) + self.mse(
-                neg_proj, neg_emb
+            # Reconstruction losses encourage the MLP outputs to remain close to the original embeddings.
+            reconstruction_loss = self.mse(pos_proj, pos_emb_batch) + self.mse(
+                neg_proj, neg_emb_batch
             )
             text_reconstruction_loss = self.mse(
                 pos_text_proj, pos_text_embedding.data
             ) + self.mse(neg_text_proj, neg_text_embedding.data)
 
+            # Combine the losses with specific weighting.
             total_loss = (
                 loss
                 + matching_loss
@@ -270,23 +367,33 @@ class A_llmrec_model(nn.Module):
             total_loss.backward()
             optimizer.step()
 
+            # Accumulate losses for reporting.
             mean_loss += total_loss.item()
             bpr_loss += loss.item()
             gt_loss += matching_loss.item()
             rc_loss += reconstruction_loss.item()
             text_rc_loss += text_reconstruction_loss.item()
 
-        print(
-            "loss in epoch {}/{} iteration {}/{}: {} / BPR loss: {} / Matching loss: {} / Item reconstruction: {} / Text reconstruction: {}".format(
+        # Compute average losses across iterations.
+        avg_mean_loss = mean_loss / num_iters
+        avg_bpr_loss = bpr_loss / num_iters
+        avg_gt_loss = gt_loss / num_iters
+        avg_rc_loss = rc_loss / num_iters
+        avg_text_rc_loss = text_rc_loss / num_iters
+
+        # Use tqdm.write to print out the loss summary (this integrates nicely with the progress bar).
+        tqdm.write(
+            "Epoch {}/{} Iteration {}/{}: Mean loss: {:.4f} / BPR loss: {:.4f} / Matching loss: {:.4f} / "
+            "Item reconstruction: {:.4f} / Text reconstruction: {:.4f}".format(
                 epoch,
                 total_epoch,
                 step,
                 total_step,
-                mean_loss / iterss,
-                bpr_loss / iterss,
-                gt_loss / iterss,
-                rc_loss / iterss,
-                text_rc_loss / iterss,
+                avg_mean_loss,
+                avg_bpr_loss,
+                avg_gt_loss,
+                avg_rc_loss,
+                avg_text_rc_loss,
             )
         )
 
@@ -335,6 +442,32 @@ class A_llmrec_model(nn.Module):
         return ",".join(candidate_text), candidate_ids
 
     def pre_train_phase2(self, data, optimizer, batch_iter):
+        """
+        Pre-train Phase 2 for the A-LLMRec model in our stock recommendation problem.
+
+        In this phase, we align collaborative filtering embeddings (derived from investor interactions
+        with stocks) with text-based representations of stocks (using their bios, tickers, etc.).
+
+        For each investor (user) in the batch:
+        - We retrieve the last positive stock interaction as the target.
+        - We generate a textual summary of the investor's historical stock interactions.
+        - We construct a candidate set of stocks (using negative sampling) and create a text prompt
+            that instructs the model to recommend one next stock.
+        - We obtain text embeddings via SBERT and project both the collaborative filtering and text
+            embeddings through MLPs.
+        - A matching loss is computed to align the two representations.
+
+        The loss is then backpropagated and the optimizer updates the model parameters.
+
+        Parameters:
+            data: A tuple (u, seq, pos, neg) where:
+                - u: Tensor of user representations.
+                - seq: Historical interaction sequences.
+                - pos: Positive (held) stock interactions.
+                - neg: Negative (not-held) stock interactions.
+            optimizer: Optimizer to update model parameters.
+            batch_iter: A tuple (epoch, total_epoch, step, total_step) providing logging context.
+        """
         epoch, total_epoch, step, total_step = batch_iter
 
         optimizer.zero_grad()
@@ -345,160 +478,188 @@ class A_llmrec_model(nn.Module):
         text_output = []
         interact_embs = []
         candidate_embs = []
+
+        # Set the LLM module to evaluation mode (no dropout, etc.).
         self.llm.eval()
 
+        # Obtain the collaborative filtering (CF) embeddings from the recsys model.
+        # Here, "log_only" mode returns user log embeddings that serve as the base for alignment.
         with torch.no_grad():
             log_emb = self.recsys.model(u, seq, pos, neg, mode="log_only")
 
-        for i in range(len(u)):
+        # We'll process each user (each row in u) one by one.
+        num_users = len(u)
+        for i in tqdm(range(num_users), desc="Phase2 iterations", leave=False, dynamic_ncols=True):
+            # For each user, use the last positive stock as the target.
             target_item_id = pos[i][-1]
             target_item_title = self.find_item_text_single(
                 target_item_id, title_flag=True, description_flag=False
             )
 
+            # Generate text summary of historical stock interactions.
             interact_text, interact_ids = self.make_interact_text(
                 seq[i][seq[i] > 0], 10
             )
             candidate_num = 20
+            # Generate candidate stock set and corresponding text prompt.
             candidate_text, candidate_ids = self.make_candidate_text(
                 seq[i][seq[i] > 0], candidate_num, target_item_id, target_item_title
             )
 
-            input_text = ""
-            input_text += " is a user representation."
-
-            if self.args.rec_pre_trained_data == "Movies_and_TV":
-                input_text += "This user has watched "
-            elif self.args.rec_pre_trained_data == "Video_Games":
-                input_text += "This user has played "
-            elif (
-                self.args.rec_pre_trained_data == "Luxury_Beauty"
-                or self.args.rec_pre_trained_data == "Toys_and_Games"
-            ):
-                input_text += "This user has bought "
-
-            input_text += interact_text
-
-            if self.args.rec_pre_trained_data == "Movies_and_TV":
-                input_text += " in the previous. Recommend one next movie for this user to watch next from the following movie title set, "
-            elif self.args.rec_pre_trained_data == "Video_Games":
-                input_text += " in the previous. Recommend one next game for this user to play next from the following game title set, "
-            elif (
-                self.args.rec_pre_trained_data == "Luxury_Beauty"
-                or self.args.rec_pre_trained_data == "Toys_and_Games"
-            ):
-                input_text += " in the previous. Recommend one next item for this user to buy next from the following item title set, "
-
-            input_text += candidate_text
-            input_text += ". The recommendation is "
+            # Build the input prompt for the language model.
+            input_text = " is a user representation. "
+            # Domain-specific prompt for stocks.
+            input_text += "This investor has held " + interact_text
+            input_text += " in the past. Recommend one next stock for this investor to invest in from the following stock ticker set, "
+            input_text += candidate_text + ". The recommendation is "
 
             text_input.append(input_text)
             text_output.append(target_item_title)
 
-            interact_embs.append(self.item_emb_proj(self.get_item_emb(interact_ids)))
-            candidate_embs.append(self.item_emb_proj(self.get_item_emb(candidate_ids)))
+            # Retrieve item embeddings for the investor's historical stocks and candidate set.
+            interact_emb = self.get_item_emb(interact_ids)
+            candidate_emb = self.get_item_emb(candidate_ids)
+            interact_embs.append(self.item_emb_proj(interact_emb))
+            candidate_embs.append(self.item_emb_proj(candidate_emb))
 
+        # Package text inputs and embeddings into a dictionary for the LLM.
         samples = {
             "text_input": text_input,
             "text_output": text_output,
             "interact": interact_embs,
             "candidate": candidate_embs,
         }
-        log_emb = self.log_emb_proj(log_emb)
-        loss_rm = self.llm(log_emb, samples)
+
+        # Project the CF embeddings using the log embedding projection.
+        log_emb_proj = self.log_emb_proj(log_emb)
+        # Compute the loss from the LLM module which aligns the collaborative and text representations.
+        loss_rm = self.llm(log_emb_proj, samples)
         loss_rm.backward()
         optimizer.step()
-        mean_loss += loss_rm.item()
-        print(
-            "A-LLMRec model loss in epoch {}/{} iteration {}/{}: {}".format(
-                epoch, total_epoch, step, total_step, mean_loss
+
+        total_loss_acc += loss_rm.item()
+
+        avg_loss = total_loss_acc / num_users
+
+        # Output the loss summary using tqdm.write for clean integration with the progress bar.
+        tqdm.write(
+            "A-LLMRec model loss in epoch {}/{} iteration {}/{}: {:.4f}".format(
+                epoch, total_epoch, step, total_step, avg_loss
             )
         )
 
-    def generate(self, data):
-        u, seq, pos, neg, rank = data
 
+    def generate(self, data):
+        """
+        Generate recommendations using the A-LLMRec model for our stock recommendation problem.
+        
+        In our setting:
+        - Each investor (user) is represented by historical interaction data with stocks.
+        - Positive instances are the stocks the investor holds.
+        - Negative instances are sampled stocks that the investor does not hold.
+        
+        This function builds a textual prompt that summarizes the investor's past stock interactions
+        and then asks the language model (LLM) to generate a recommendation based on a candidate set
+        of stock tickers. The text prompt, embeddings from collaborative filtering, and the text
+        representations from SBERT are combined to compute a loss that aligns these representations.
+        
+        The process is:
+        1. Obtain CF embeddings (log_emb) using the recsys model in "log_only" mode.
+        2. For each investor in the batch, construct:
+            - A text summary of historical stock interactions (interact_text).
+            - A candidate set of stock tickers (candidate_text).
+            - An input prompt that instructs the LLM to recommend a next stock.
+        3. Convert the text prompt to embeddings via the LLM's tokenizer and replace tokens with the 
+            projected collaborative filtering and candidate embeddings.
+        4. Generate output text from the LLM and write the prompt, target answer, and LLM output to a file.
+        
+        Parameters:
+            data: A tuple (u, seq, pos, neg, rank) where:
+                - u: User representation tensor.
+                - seq: Historical interaction sequences.
+                - pos: Positive stock interactions (the stocks held by the investor).
+                - neg: Negative stock interactions (sampled stocks not held).
+                - rank: Ranking information (if used).
+            optimizer: The optimizer used for updating model parameters.
+            batch_iter: A tuple (epoch, total_epoch, step, total_step) for logging.
+        
+        Returns:
+            A list of generated recommendation stocks.
+        """
+        u, seq, pos, neg, _ = data
+       
         answer = []
         text_input = []
         interact_embs = []
         candidate_embs = []
+
+        # Set LLM to evaluation mode.
+        self.llm.eval()
+
         with torch.no_grad():
+            # Obtain collaborative filtering (CF) embeddings (log_emb) from the recsys model.
+            # 'log_only' returns user log embeddings representing the investor.
             log_emb = self.recsys.model(u, seq, pos, neg, mode="log_only")
-            for i in range(len(u)):
-                target_item_id = pos[i]
+
+            # Process each investor (each row in u) with a progress bar.
+            for i in tqdm(range(len(u)), desc="Generating recommendations", dynamic_ncols=True, leave=False):
+                # Use the last positive interaction as the target stock.
+                target_item_id = pos[i][-1]
                 target_item_title = self.find_item_text_single(
                     target_item_id, title_flag=True, description_flag=False
                 )
 
-                interact_text, interact_ids = self.make_interact_text(
-                    seq[i][seq[i] > 0], 10
-                )
+                # Construct a textual summary of the investor's historical stock interactions.
+                interact_text, interact_ids = self.make_interact_text(seq[i][seq[i] > 0], 10)
                 candidate_num = 20
+                # Generate candidate stock set and corresponding text prompt.
                 candidate_text, candidate_ids = self.make_candidate_text(
                     seq[i][seq[i] > 0], candidate_num, target_item_id, target_item_title
                 )
 
-                input_text = ""
-                input_text += " is a user representation."
-                if self.args.rec_pre_trained_data == "Movies_and_TV":
-                    input_text += "This user has watched "
-                elif self.args.rec_pre_trained_data == "Video_Games":
-                    input_text += "This user has played "
-                elif (
-                    self.args.rec_pre_trained_data == "Luxury_Beauty"
-                    or self.args.rec_pre_trained_data == "Toys_and_Games"
-                ):
-                    input_text += "This user has bought "
+                # Build the input prompt for the language model.
+                input_text = " is a user representation. "
+                # For our stock domain, we describe the investor's historical stock holdings.
+                input_text += "This investor has held " + interact_text
+                input_text += " in the past. Recommend one next stock for this investor to invest in from the following stock ticker set, "
+                input_text += candidate_text + ". The recommendation is "
 
-                input_text += interact_text
-
-                if self.args.rec_pre_trained_data == "Movies_and_TV":
-                    input_text += " in the previous. Recommend one next movie for this user to watch next from the following movie title set, "
-                elif self.args.rec_pre_trained_data == "Video_Games":
-                    input_text += " in the previous. Recommend one next game for this user to play next from the following game title set, "
-                elif (
-                    self.args.rec_pre_trained_data == "Luxury_Beauty"
-                    or self.args.rec_pre_trained_data == "Toys_and_Games"
-                ):
-                    input_text += " in the previous. Recommend one next item for this user to buy next from the following item title set, "
-
-                input_text += candidate_text
-                input_text += ". The recommendation is "
-
-                answer.append(target_item_title)
                 text_input.append(input_text)
+                answer.append(target_item_title)
 
-                interact_embs.append(
-                    self.item_emb_proj(self.get_item_emb(interact_ids))
-                )
-                candidate_embs.append(
-                    self.item_emb_proj(self.get_item_emb(candidate_ids))
-                )
+                # Project the investor's historical and candidate item IDs into embedding space.
+                interact_embs.append(self.item_emb_proj(self.get_item_emb(interact_ids)))
+                candidate_embs.append(self.item_emb_proj(self.get_item_emb(candidate_ids)))
 
+        # Project the collaborative filtering embeddings.
         log_emb = self.log_emb_proj(log_emb)
+        # Prepare attention mask for LLM input.
         atts_llm = torch.ones(log_emb.size()[:-1], dtype=torch.long).to(self.device)
         atts_llm = atts_llm.unsqueeze(1)
         log_emb = log_emb.unsqueeze(1)
 
         with torch.no_grad():
+            # Ensure the LLM tokenizer pads on the left.
             self.llm.llm_tokenizer.padding_side = "left"
+            # Tokenize the text inputs and get LLM tokens.
             llm_tokens = self.llm.llm_tokenizer(
                 text_input, padding="longest", return_tensors="pt"
             ).to(self.device)
 
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast(device_type="cuda"):
+                # Get the input embeddings for the tokenized text.
                 inputs_embeds = self.llm.llm_model.get_input_embeddings()(
                     llm_tokens.input_ids
                 )
-
+                # Replace history candidate tokens with our projected embeddings.
                 llm_tokens, inputs_embeds = self.llm.replace_hist_candi_token(
                     llm_tokens, inputs_embeds, interact_embs, candidate_embs
                 )
-
-                attention_mask = llm_tokens.attention_mask
-                inputs_embeds = torch.cat([log_emb, inputs_embeds], dim=1)
+                # Concatenate the user log embeddings with the text embeddings.
                 attention_mask = torch.cat([atts_llm, llm_tokens.attention_mask], dim=1)
+                inputs_embeds = torch.cat([log_emb, inputs_embeds], dim=1)
 
+                # Generate output tokens using the LLM.
                 outputs = self.llm.llm_model.generate(
                     inputs_embeds=inputs_embeds,
                     attention_mask=attention_mask,
@@ -514,22 +675,18 @@ class A_llmrec_model(nn.Module):
                     num_return_sequences=1,
                 )
 
-            outputs[outputs == 0] = 2  # convert output id 0 to 2 (eos_token_id)
+            # Convert token IDs to text.
+            outputs[outputs == 0] = 2  # Convert output id 0 to 2 (eos_token_id)
             output_text = self.llm.llm_tokenizer.batch_decode(
                 outputs, skip_special_tokens=True
             )
             output_text = [text.strip() for text in output_text]
 
+        # Write out each generated prompt and answer for record-keeping.
         for i in range(len(text_input)):
-            f = open(f"./recommendation_output.txt", "a")
-            f.write(text_input[i])
-            f.write("\n\n")
-
-            f.write("Answer: " + answer[i])
-            f.write("\n\n")
-
-            f.write("LLM: " + str(output_text[i]))
-            f.write("\n\n")
-            f.close()
+            with open("./recommendation_output.txt", "a") as f:
+                f.write(text_input[i] + "\n\n")
+                f.write("Answer: " + answer[i] + "\n\n")
+                f.write("LLM: " + str(output_text[i]) + "\n\n")
 
         return output_text

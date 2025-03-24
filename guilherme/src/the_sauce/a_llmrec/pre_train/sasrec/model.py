@@ -2,6 +2,42 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+"""
+In our context, collaborative filtering refers to a recommendation method that 
+learns patterns solely from historical interaction data—in this case,
+the investment entities' holdings (from filings or transaction records). 
+Here's what that means for our us:
+
+    Investor-Stock Interactions:
+    We treat each investment entity (e.g., an institutional investor) as a “user” and each 
+    stock as an “item.” The historical record of which stocks each investor 
+    holds is used as the interaction data.
+
+    Learning Latent Representations:
+    A collaborative filtering model (the RecSys component) learns latent embeddings 
+    for both investors and stocks based on these interactions. 
+    These embeddings capture hidden factors such as investment strategies or 
+    stock characteristics that are common among similar investors or stocks.
+
+    Prediction by Similarity:
+    Once the model has learned these representations, it can predict 
+    the likelihood that an investor would be interested in a particular 
+    stock—essentially recommending stocks that “fit” well with the investor's past behavior.
+
+    Why It Matters for Us:
+    In our assignment, while we also incorporate content features (like stock bios and tickers) 
+    through text embeddings, the collaborative filtering part gives us a signal based 
+    solely on historical investment patterns. This helps the system suggest stocks that
+    are popular or relevant among similar investors, even before considering additional textual information.
+    
+Thus, we  use observed interactions (i.e., which stocks are held by which investors) to learn 
+an underlying structure of investor preferences and stock characteristics, enabling the recsys 
+to make personalized suggestions.
+
+
+
+"""
+
 
 class PointWiseFeedForward(torch.nn.Module):
     def __init__(self, hidden_units, dropout_rate):
@@ -24,7 +60,7 @@ class PointWiseFeedForward(torch.nn.Module):
 
 
 class SASRec(nn.Module):
-    def __init__(self, user_num, item_num, args, combined_feat_dim):
+    def __init__(self, user_num, item_num, args, combined_feat_dim=8):
         super(SASRec, self).__init__()
 
         self.kwargs = {"user_num": user_num, "item_num": item_num, "args": args}

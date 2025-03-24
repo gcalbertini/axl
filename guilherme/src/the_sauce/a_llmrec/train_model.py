@@ -199,9 +199,7 @@ def inference_(rank, world_size, args):
     phase2_epoch = 5
     model.load_model(args, phase1_epoch=phase1_epoch, phase2_epoch=phase2_epoch)
 
-    dataset = data_partition(
-        args.rec_pre_trained_data, path=f"./data/amazon/{args.rec_pre_trained_data}.txt"
-    )
+    dataset = data_partition("guilherme/data/processed/sequences.txt")
     [user_train, user_valid, user_test, usernum, itemnum] = dataset
     print("user num:", usernum, "item num:", itemnum)
     num_batch = len(user_train) // args.batch_size_infer

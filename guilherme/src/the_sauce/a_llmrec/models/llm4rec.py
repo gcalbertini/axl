@@ -115,7 +115,7 @@ class llm4rec(nn.Module):
         inputs_embeds = torch.cat([log_emb, inputs_embeds], dim=1)
         attention_mask = torch.cat([atts_llm, llm_tokens['attention_mask']], dim=1)
         
-        with torch.cuda.amp.autocast():
+        with torch.amp.autocast(device_type="cuda"):
             outputs = self.llm_model(
                 inputs_embeds=inputs_embeds,
                 attention_mask=attention_mask,

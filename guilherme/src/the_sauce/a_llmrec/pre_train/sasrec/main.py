@@ -45,9 +45,20 @@ In Short
     Data Source: Holdings data capture past investor behavior.
     Processing: You build sequential interaction data (per investor) and train a model to predict the next investment.
     Output: The model produces a ranked list (target list) with confidence scores for each investor.
-    Customer Value: These target lists guide customers on which investors might be receptive to outreach, based on historical behavior.
+    Customer Value: These target lists guide customers on which investors might be receptive to outreach, 
+    based on historical behavior.
 
-Thus, the recommendation process leverages our holdings data to generate actionable target lists for customers, and evaluation metrics like HR and NDCG help ensure these lists are both accurate and well-ranked.
+Thus, the recommendation process leverages our holdings data to generate actionable target lists for customers, 
+and evaluation metrics like HR and NDCG help ensure these lists are both accurate and well-ranked.
+
+NOTE When you use historical interactions to enrich your collaborative filtering model,
+the core idea is that you're learning user and item embeddings based solely on past behaviour. 
+However, the engineered features of the org (such as additional metadata, textual descriptions, 
+or other curated signals) part of the user tower are designed to provide extra context that 
+might not be fully captured by interactions alone.Even if you don't have explicit org features, 
+the fact that an organization has held certain stocks provides a strong implicit signal about its interests. 
+The model uses these signals to position both users and items in a latent space, where similar users and
+similar stocks end up close together.
 
 """
 
@@ -117,6 +128,7 @@ def read_csv_with_progress(filename, chunksize=256, total_rows=None):
         pd.read_csv(filename, chunksize=chunksize),
         total=total_chunks,
         desc="Reading CSV",
+        dynamic_ncols=True,
     ):
         chunks.append(chunk)
     df = pd.concat(chunks, ignore_index=True)
@@ -195,20 +207,7 @@ def preprocess(df, processed_org_path, seq_out_file):
 
     # Load the orgs CSV to build org_dict.
     df_orgs = pd.read_csv(processed_org_path)
-    """
-    
-    for orig_org, new_id in usermap.items():
-        # Filter df_orgs rows where org_id matches.
-        row = df_orgs[df_orgs["org_id_encoded"] == orig_org]
-        if not row.empty:
-            bio = row.iloc[0].get("bio", "No bio available")
-            ticker = row.iloc[0].get("stock_ticker", "Unknown")
-        else:
-            bio = "No bio available"
-            ticker = "Unknown"
-        org_dict[new_id] = {"bio": bio, "stock_ticker": ticker}
-    
-    """
+
     # Create a dictionary with two keys: "bio" and "stock_ticker"
     text_name_dict = {"bio": {}, "stock_ticker": {}}
     for orig_org, new_id in usermap.items():
@@ -266,10 +265,10 @@ parser.add_argument(
 )
 parser.add_argument("--batch_size", default=64, type=int)
 parser.add_argument("--lr", default=0.002, type=float)
-parser.add_argument("--maxlen", default=50, type=int)
-parser.add_argument("--hidden_units", default=50, type=int)
+parser.add_argument("--maxlen", default=58, type=int)  # around the avg
+parser.add_argument("--hidden_units", default=60, type=int)
 parser.add_argument("--num_blocks", default=2, type=int)
-parser.add_argument("--num_epochs", default=160, type=int)
+parser.add_argument("--num_epochs", default=200, type=int)
 parser.add_argument("--num_heads", default=1, type=int)
 parser.add_argument("--dropout_rate", default=0.5, type=float)
 parser.add_argument("--l2_emb", default=0.0, type=float)
@@ -294,10 +293,9 @@ extra_feature_cols = [
     "shares_change_ratio",
     "avg_share_price",
     "percent_change",
-    "avg_share_price",
     "position_change_type",
-    "filer_id",
-    "percent_ownership",
+    "current_ranking",
+    "current_percent_of_portfolio",
 ]
 parser.add_argument(
     "--holdings_extra_features",
@@ -336,13 +334,13 @@ if __name__ == "__main__":
 
     # --- Load extra item features ---
 
-    # Hack -- lets include some one hot columns, too
+    # Hack -- can include OHE features (try low cardinality), too
     if args.holdings_extra_features:
-        # Build a lookup dictionary: item_id -> extra features vector.
+        # Build a lookup dictionary: item_id -> extra features vector; OHE arent usually too helpful with
+        # enriching due to sparsity (inherent orthgonality not conducive to sim measure) not leading to meaningful rel.
+        # bet categories so opt for sector for a balance?
         extra_one_hot = [
-            col
-            for col in df.columns
-            if col.startswith("sector_") or col.startswith("industry_")
+            col for col in df.columns if col.startswith("PROBABLYDONTINCLUDE")
         ]
         extra_feature_cols += extra_one_hot
 
@@ -419,7 +417,7 @@ if __name__ == "__main__":
     """
 
     # --- Training Loop ---
-    for epoch in tqdm(range(epoch_start_idx, args.num_epochs + 1)):
+    for epoch in tqdm(range(epoch_start_idx, args.num_epochs + 1), dynamic_ncols=True):
         if args.inference_only:
             break
         for step in range(num_batch):
@@ -439,8 +437,8 @@ if __name__ == "__main__":
                     )
                     seq_feats.append(feat)
                 batch_extra_feats.append(seq_feats)
-            batch_extra_feats = torch.tensor(batch_extra_feats, dtype=torch.float).to(
-                args.device
+            batch_extra_feats = (
+                torch.from_numpy(np.array(batch_extra_feats)).float().to(args.device)
             )
 
             pos_logits, neg_logits = model(
@@ -461,7 +459,7 @@ if __name__ == "__main__":
             if step % 100 == 0:
                 print("Epoch {} Step {} Loss: {:.4f}".format(epoch, step, loss.item()))
 
-        if epoch % 20 == 0 or epoch == 1:
+        if epoch % 50 == 0 or epoch == 1:
             model.eval()
             t1 = time.time() - t0
             T += t1
