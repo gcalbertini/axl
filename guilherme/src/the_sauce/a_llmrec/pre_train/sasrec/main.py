@@ -264,11 +264,11 @@ parser.add_argument(
     default="guilherme/data/processed/orgs_processed.csv",
 )
 parser.add_argument("--batch_size", default=64, type=int)
-parser.add_argument("--lr", default=0.0008, type=float)
+parser.add_argument("--lr", default=0.001, type=float)
 parser.add_argument("--maxlen", default=58, type=int)  # around the avg
-parser.add_argument("--hidden_units", default=60, type=int)
+parser.add_argument("--hidden_units", default=128, type=int) # for our use-case this must match latent dim of CF
 parser.add_argument("--num_blocks", default=2, type=int)
-parser.add_argument("--num_epochs", default=250, type=int)
+parser.add_argument("--num_epochs", default=100, type=int)
 parser.add_argument("--num_heads", default=1, type=int)
 parser.add_argument("--dropout_rate", default=0.5, type=float)
 parser.add_argument("--l2_emb", default=0.0, type=float)
