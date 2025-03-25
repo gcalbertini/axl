@@ -211,13 +211,15 @@ class A_llmrec_model(nn.Module):
 
         return item_embs
 
-    def forward(self, data, optimizer=None, batch_iter=None, mode="phase1"):
+    def forward(self, data, args, optimizer=None, batch_iter=None, mode="phase1"):
         if mode == "phase1":
             self.pre_train_phase1(data, optimizer, batch_iter)
         if mode == "phase2":
             self.pre_train_phase2(data, optimizer, batch_iter)
-        if mode == "generate":
-            self.generate(data)
+        # if mode == "generate":
+        #    self.generate(data)
+        if mode == "generate_target_list_for_company":
+            self.generate_target_list_for_company(data, args)
 
     def pre_train_phase1(self, data, optimizer, batch_iter):
         """
@@ -281,8 +283,8 @@ class A_llmrec_model(nn.Module):
         pos_ = pos.reshape(pos.size)[indices]
         neg_ = neg.reshape(neg.size)[indices]
 
-        # Define the batch size and calculate the number of iterations.
-        batch_size = 60
+        # BUG terrible. should not be hardcoded. Come from args.
+        batch_size = 64
         num_iters = math.ceil(len(log_emb_) / batch_size)
 
         # Initialize loss accumulators.
@@ -388,7 +390,7 @@ class A_llmrec_model(nn.Module):
             "Epoch {}/{} Iteration {}/{}: Mean loss: {:.4f} / BPR loss: {:.4f} / Matching loss: {:.4f} / "
             "Item reconstruction: {:.4f} / Text reconstruction: {:.4f}".format(
                 epoch,
-                total_epoch - 1,  # BUG off-by-one in input despite correct processing
+                total_epoch,
                 step,
                 total_step,
                 avg_mean_loss,
@@ -510,11 +512,17 @@ class A_llmrec_model(nn.Module):
                 seq[i][seq[i] > 0], candidate_num, target_item_id, target_item_title
             )
 
-            # Build the input prompt for the language model.
-            input_text = " is a user (investor) representation. "
-            # Domain-specific prompt for stocks.
-            input_text += "This user (investor) has held " + interact_text
-            input_text += " in the past. Recommend one next item (stock) for this user (investor) to target from the following stock ticker set, "
+            # Replace self.get_user_info with your method to obtain a meaningful investor description.
+            user_info = (
+                self.get_user_info(u[i])
+                if hasattr(self, "get_user_info")
+                else "Investor"
+            )
+
+            # Build the input prompt for the LLM.
+            input_text = user_info + " is a user representation. "
+            input_text += "This investor has held " + interact_text
+            input_text += " in the past. Recommend one next stock for this investor to invest in from the following stock ticker set, "
             input_text += candidate_text + ". The recommendation is "
 
             text_input.append(input_text)
@@ -541,7 +549,7 @@ class A_llmrec_model(nn.Module):
         loss_rm.backward()
         optimizer.step()
 
-        '''
+        """
         NOTE I guess this is intention as batch size was small since you run out of vram for this phase > 16 on even 1x A100?
         In this Phase 2 implementation, the loss is computed for the entire batch in a single
         forward pass rather than accumulating losses over multiple mini-batches. In other words,
@@ -550,8 +558,10 @@ class A_llmrec_model(nn.Module):
         This loss value is then used directly (and added to mean_loss) without dividing by the number of iterations.
         If it was intended to average the loss per user, you would need to divide by the number of users (i.e. len(u))—but as
         implemented, loss_rm represents the aggregate loss over the *entire* batch.
-        '''
-        mean_loss += loss_rm.item() / len(u) # TODO may be too small for several users and won't display well ~0
+        """
+        mean_loss += loss_rm.item() / len(
+            u
+        )  # TODO may be too small for several users and won't display well ~0
 
         # Output the loss summary using tqdm.write for clean integration with the progress bar.
         tqdm.write(
@@ -577,11 +587,11 @@ class A_llmrec_model(nn.Module):
         The process is:
         1. Obtain CF embeddings (log_emb) using the recsys model in "log_only" mode.
         2. For each investor in the batch, construct:
-            - A text summary of historical stock interactions (interact_text).
-            - A candidate set of stock tickers (candidate_text).
-            - An input prompt that instructs the LLM to recommend a next stock.
+        - A text summary of historical stock interactions (interact_text).
+        - A candidate set of stock tickers (candidate_text).
+        - An input prompt that instructs the LLM to recommend a next stock.
         3. Convert the text prompt to embeddings via the LLM's tokenizer and replace tokens with the
-            projected collaborative filtering and candidate embeddings.
+        projected collaborative filtering and candidate embeddings.
         4. Generate output text from the LLM and write the prompt, target answer, and LLM output to a file.
 
         Parameters:
@@ -591,9 +601,6 @@ class A_llmrec_model(nn.Module):
                 - pos: Positive stock interactions (the stocks held by the investor).
                 - neg: Negative stock interactions (sampled stocks not held).
                 - rank: Ranking information (if used).
-            optimizer: The optimizer used for updating model parameters.
-            batch_iter: A tuple (epoch, total_epoch, step, total_step) for logging.
-
         Returns:
             A list of generated recommendation stocks.
         """
@@ -608,36 +615,41 @@ class A_llmrec_model(nn.Module):
         self.llm.eval()
 
         with torch.no_grad():
-            # Obtain collaborative filtering (CF) embeddings (log_emb) from the recsys model.
-            # 'log_only' returns user log embeddings representing the investor.
+            # Obtain CF embeddings (log_emb) representing investor interactions.
             log_emb = self.recsys.model(u, seq, pos, neg, mode="log_only")
 
-            # Process each investor (each row in u) with a progress bar.
+            # Process each investor with a progress bar.
             for i in tqdm(
                 range(len(u)),
                 desc="Generating recommendations",
                 dynamic_ncols=True,
                 leave=False,
             ):
-                # Use the last positive interaction as the target stock.
-                target_item_id = pos[i][-1]
+                # Retrieve target stock information.
+                target_item_id = pos[i]
                 target_item_title = self.find_item_text_single(
                     target_item_id, title_flag=True, description_flag=False
                 )
 
-                # Construct a textual summary of the investor's historical stock interactions.
+                # Build a textual summary of historical stock interactions.
                 interact_text, interact_ids = self.make_interact_text(
                     seq[i][seq[i] > 0], 10
                 )
                 candidate_num = 20
-                # Generate candidate stock set and corresponding text prompt.
                 candidate_text, candidate_ids = self.make_candidate_text(
                     seq[i][seq[i] > 0], candidate_num, target_item_id, target_item_title
                 )
 
-                # Build the input prompt for the language model.
-                input_text = " is a user representation. "
-                # For our stock domain, we describe the investor's historical stock holdings.
+                # Retrieve user representation.
+                # Replace self.get_user_info with your method to obtain a meaningful investor description.
+                user_info = (
+                    self.get_user_info(u[i])
+                    if hasattr(self, "get_user_info")
+                    else "Investor"
+                )
+
+                # Build the input prompt for the LLM.
+                input_text = user_info + " is a user representation. "
                 input_text += "This investor has held " + interact_text
                 input_text += " in the past. Recommend one next stock for this investor to invest in from the following stock ticker set, "
                 input_text += candidate_text + ". The recommendation is "
@@ -645,7 +657,7 @@ class A_llmrec_model(nn.Module):
                 text_input.append(input_text)
                 answer.append(target_item_title)
 
-                # Project the investor's historical and candidate item IDs into embedding space.
+                # Project the investor's historical and candidate item IDs into the embedding space.
                 interact_embs.append(
                     self.item_emb_proj(self.get_item_emb(interact_ids))
                 )
@@ -653,35 +665,34 @@ class A_llmrec_model(nn.Module):
                     self.item_emb_proj(self.get_item_emb(candidate_ids))
                 )
 
-        # Project the collaborative filtering embeddings.
+        # Ensure that text_name_dict is correctly populated so that find_item_text returns meaningful info.
+        # If many outputs are "Unknown", check that your pre-processing produced a complete text_name_dict.
+
+        # Project the CF embeddings.
         log_emb = self.log_emb_proj(log_emb)
-        # Prepare attention mask for LLM input.
-        atts_llm = torch.ones(log_emb.size()[:-1], dtype=torch.long).to(self.device)
-        atts_llm = atts_llm.unsqueeze(1)
+        atts_llm = (
+            torch.ones(log_emb.size()[:-1], dtype=torch.long)
+            .to(self.device)
+            .unsqueeze(1)
+        )
         log_emb = log_emb.unsqueeze(1)
 
         with torch.no_grad():
-            # Ensure the LLM tokenizer pads on the left.
             self.llm.llm_tokenizer.padding_side = "left"
-            # Tokenize the text inputs and get LLM tokens.
             llm_tokens = self.llm.llm_tokenizer(
                 text_input, padding="longest", return_tensors="pt"
             ).to(self.device)
 
-            with torch.amp.autocast(device_type="cuda"):
-                # Get the input embeddings for the tokenized text.
+            with torch.amp.autocast("cuda"):
                 inputs_embeds = self.llm.llm_model.get_input_embeddings()(
                     llm_tokens.input_ids
                 )
-                # Replace history candidate tokens with our projected embeddings.
                 llm_tokens, inputs_embeds = self.llm.replace_hist_candi_token(
                     llm_tokens, inputs_embeds, interact_embs, candidate_embs
                 )
-                # Concatenate the user log embeddings with the text embeddings.
                 attention_mask = torch.cat([atts_llm, llm_tokens.attention_mask], dim=1)
                 inputs_embeds = torch.cat([log_emb, inputs_embeds], dim=1)
 
-                # Generate output tokens using the LLM.
                 outputs = self.llm.llm_model.generate(
                     inputs_embeds=inputs_embeds,
                     attention_mask=attention_mask,
@@ -697,14 +708,13 @@ class A_llmrec_model(nn.Module):
                     num_return_sequences=1,
                 )
 
-            # Convert token IDs to text.
             outputs[outputs == 0] = 2  # Convert output id 0 to 2 (eos_token_id)
             output_text = self.llm.llm_tokenizer.batch_decode(
                 outputs, skip_special_tokens=True
             )
             output_text = [text.strip() for text in output_text]
 
-        # Write out each generated prompt and answer for record-keeping.
+        # Write out generated prompts and answers.
         for i in range(len(text_input)):
             with open("./recommendation_output.txt", "a") as f:
                 f.write(text_input[i] + "\n\n")
@@ -712,3 +722,121 @@ class A_llmrec_model(nn.Module):
                 f.write("LLM: " + str(output_text[i]) + "\n\n")
 
         return output_text
+
+    def compute_rationale(self, investor_id, target_info):
+        """
+        Compute a rationale for why the given investor might be interested in the target company.
+
+        This function builds a prompt using:
+        - The investor's bio (retrieved from self.text_name_dict, which was generated in preprocessing).
+        - The target company's stock_ticker and bio from target_info.
+        The prompt is fed to the LLM to generate a natural-language explanation.
+
+        Parameters:
+            investor_id: The unique identifier for the investor.
+            target_info: A dictionary containing target company details (e.g., 'stock_ticker', 'bio').
+
+        Returns:
+            A string rationale generated by the LLM.
+        """
+        # Retrieve investor's bio from the text_name_dict; fallback to a default message.
+        investor_bio = self.text_name_dict.get("bio", {}).get(
+            investor_id, "No bio available"
+        )
+
+        # Retrieve target company details.
+        target_ticker = target_info.get("stock_ticker", "Unknown ticker")
+        target_bio = target_info.get("bio", "No bio available")
+
+        # Build the prompt for the LLM.
+        prompt = (
+            f"Investor Info: {investor_bio}\n"
+            f"Target Company: {target_ticker} with details: {target_bio}\n"
+            "Provide a rationale explaining why this investor might be interested in the target company."
+        )
+
+        # Tokenize and generate the rationale using the LLM.
+        self.llm.llm_tokenizer.padding_side = "left"
+        tokens = self.llm.llm_tokenizer(prompt, return_tensors="pt").to(self.device)
+        # Generate text with a controlled sampling strategy.
+        with torch.no_grad():
+            generated = self.llm.llm_model.generate(
+                input_ids=tokens.input_ids,
+                attention_mask=tokens.attention_mask,
+                max_length=150,
+                do_sample=True,
+                temperature=0.7,
+                num_return_sequences=1,
+            )
+        rationale = self.llm.llm_tokenizer.decode(
+            generated[0], skip_special_tokens=True
+        )
+        return rationale
+
+    def generate_target_list_for_company(self, data, args):
+        """
+        Generate a target list of investors for a given company, including confidence scores and
+        rationale generated via the LLM.
+
+        The company is identified by its decoded email extension (e.g., "cvshealth.com").
+        Using the email_extension_map, we convert this to the encoded form and look it up in the
+        processed orgs CSV. We then compute the target company's CF embedding from its stock_id.
+
+        For each investor (from self.all_investors), we retrieve their CF embedding (via get_investor_emb),
+        compute a confidence score (dot product with the target embedding), and then generate a rationale
+        using the LLM.
+
+        Returns:
+            A tuple:
+            - investor_scores: Sorted list of tuples (investor_id, confidence_score, rationale).
+            - target_info: The processed target company information (dictionary).
+        """
+        import pandas as pd
+        import pickle
+        import torch
+
+        target_company_decoded_email = args.email_extension
+
+        # 1. Convert the decoded email to its encoded form using the email extension map.
+        with open("guilherme/data/raw/email_extension_map.pkl", "rb") as f:
+            email_extension_map = pickle.load(f)
+        encoded_email = email_extension_map.get(target_company_decoded_email)
+        if encoded_email is None:
+            raise ValueError(
+                f"Decoded email '{target_company_decoded_email}' not found in the map."
+            )
+
+        # 2. Load processed orgs data and retrieve the target company's information.
+        df_orgs = pd.read_csv("guilherme/data/processed/orgs_processed.csv")
+        target_rows = df_orgs[df_orgs["email_extension_encoded"] == encoded_email]
+        if target_rows.empty:
+            raise ValueError(f"No company found for encoded email '{encoded_email}'.")
+        target_info = target_rows.iloc[0].to_dict()
+        if "stock_id" not in target_info:
+            raise ValueError("Target company information is missing 'stock_id'.")
+
+        # 3. Compute the target company's CF embedding.
+        target_embedding = self.log_emb_proj(
+            self.get_item_emb([target_info["stock_id"]])
+        )
+        target_embedding = self.log_emb_proj(target_embedding).squeeze(
+            0
+        )  # batch size of 1
+
+        investor_scores = []
+        # 4. Derive the list of investors.
+        # Here we use the keys from self.text_name_dict["bio"] as the investor IDs.
+        investor_list = list(self.text_name_dict.get("bio", {}).keys())
+
+        for investor_id in investor_list:
+            investor_emb = self.get_item_emb(investor_id)
+            confidence_score = torch.dot(investor_emb, target_embedding).item()
+
+            # Use the LLM to generate a rationale.
+            rationale = self.compute_rationale(investor_id, target_info)
+            investor_scores.append((investor_id, confidence_score, rationale))
+
+        # 5. Sort the investor scores in descending order.
+        investor_scores.sort(key=lambda x: x[1], reverse=True)
+
+        return investor_scores, target_info

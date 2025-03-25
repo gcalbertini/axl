@@ -141,67 +141,108 @@ def fill_missing_from_holdings_with_two_matches(
     return df_filled
 
 
-def populate_missing_fields_from_stocks(
-    df_incoming, stocks_csv_path, merge_key="stock_id", mapping=None, default_value=0
-):
+def convert_key(val):
     """
-    Populate missing stock-related values in the incoming DataFrame using reference data from stocks.csv.
+    Convert a key value to a standardized string.
+    For numeric values, convert to float then int to remove trailing decimals,
+    otherwise return the stripped string.
+    """
+    try:
+        return str(int(float(val)))
+    except Exception:
+        return str(val).strip()
 
-    Parameters:
-      df_incoming (DataFrame): The DataFrame (typically holdings) that might have missing stock info.
-      stocks_csv_path (str): Path to the stocks CSV file.
-      merge_key (str): Key used to merge (default is 'stock_id').
-      mapping (dict): Dictionary mapping target columns in df_incoming to reference columns in stocks.csv.
-      default_value: Value used to fill missing data if still missing after merge.
+
+def convert_key(val):
+    """
+    Convert a key value to a standardized string.
+    For numeric values, convert to float then int to remove trailing decimals,
+    otherwise return the stripped string.
+    """
+    try:
+        return str(int(float(val)))
+    except Exception:
+        return str(val).strip()
+
+
+def populate_missing_stock_fields_in_holdings(df_holdings, stocks_csv_path):
+    """
+    Populate missing values in df_holdings for 'stock_ticker' and 'stock_id'
+    using reference data from stocks.csv.
+
+    stocks.csv is expected to contain:
+      - 'id': the stock identifier (to be renamed to 'stock_id'),
+      - 'symbol': the stock ticker (to be renamed to 'stock_ticker'),
+      - (other columns are ignored).
+
+    For each row in df_holdings:
+      - If stock_id is present but stock_ticker is missing, look up the stock_ticker
+        from stocks.csv using stock_id.
+      - If stock_ticker is present but stock_id is missing, look up the stock_id using stock_ticker.
+      - If both are missing or if a lookup fails, the row is marked for deletion.
+      - In addition, rows with a stock_id equal to -1 or 0 (after conversion) are dropped.
 
     Returns:
-      df_result (DataFrame): DataFrame with missing stock fields filled.
-
-    Process:
-      - Use default mapping if none is provided.
-      - Load stocks.csv, rename 'id' column to merge_key if needed.
-      - Merge df_incoming with the relevant subset of stocks data.
-      - For each target field, fill missing values with corresponding values from stocks.
-      - Return the DataFrame with original column order.
+      Updated df_holdings with missing fields filled from stocks.csv, and with rows having
+      invalid stock_id (-1 or 0) removed.
     """
-    if mapping is None:
-        mapping = {
-            "ticker": "symbol",
-            "stock_name": "name",
-            "sector": "sector",
-            "industry": "industry",
-        }
-    valid_mapping = {
-        target: ref for target, ref in mapping.items() if target in df_incoming.columns
-    }
-    if not valid_mapping:
-        return df_incoming
+    # Read only the necessary columns from stocks.csv.
+    df_stocks = pd.read_csv(stocks_csv_path, usecols=['id', 'symbol'])
+    
+    # Rename columns to match df_holdings.
+    df_stocks.rename(columns={'id': 'stock_id', 'symbol': 'stock_ticker'}, inplace=True)
+    
+    # Standardize the key fields to strings.
+    df_stocks['stock_id'] = df_stocks['stock_id'].astype(str).str.strip()
+    df_stocks['stock_ticker'] = df_stocks['stock_ticker'].astype(str).str.strip()
+    
+    # Build lookup dictionaries.
+    lookup_by_id = df_stocks.set_index('stock_id')['stock_ticker'].to_dict()
+    lookup_by_ticker = df_stocks.set_index('stock_ticker')['stock_id'].to_dict()
+    
+    # Prepare a list to record rows to drop.
+    drop_indices = []
+    
+    def update_row(row):
+        # Standardize current row values.
+        stock_id = str(row.get('stock_id')).strip() if pd.notna(row.get('stock_id')) else None
+        stock_ticker = str(row.get('stock_ticker')).strip() if pd.notna(row.get('stock_ticker')) and row.get('stock_ticker') != "" else None
+        
+        # Case 1: Both values exist -> do nothing.
+        if stock_id and stock_ticker:
+            return row
+        # Case 2: stock_id exists but stock_ticker is missing -> look up ticker.
+        elif stock_id and not stock_ticker:
+            candidate = lookup_by_id.get(stock_id)
+            if candidate:
+                row['stock_ticker'] = candidate
+            else:
+                drop_indices.append(row.name)
+        # Case 3: stock_ticker exists but stock_id is missing -> look up stock_id.
+        elif stock_ticker and not stock_id:
+            candidate = lookup_by_ticker.get(stock_ticker)
+            if candidate:
+                row['stock_id'] = candidate
+            else:
+                drop_indices.append(row.name)
+        # Case 4: Both are missing -> drop the row.
+        else:
+            drop_indices.append(row.name)
+        return row
 
-    original_cols = df_incoming.columns.tolist()
-    df_stocks = pd.read_csv(stocks_csv_path)
-    if "id" in df_stocks.columns:
-        df_stocks = df_stocks.rename(columns={"id": merge_key})
-    required_ref_cols = list(set(valid_mapping.values()))
-    required_cols = [merge_key] + required_ref_cols
-    df_stocks_subset = df_stocks[required_cols].copy()
+    df_holdings_updated = df_holdings.apply(update_row, axis=1)
+    df_holdings_updated = df_holdings_updated.drop(index=drop_indices)
+    
+    # Drop rows where stock_id (converted to float) is -1 or 0.
+    def valid_stock_id(sid):
+        try:
+            return float(sid) not in [-1, 0]
+        except Exception:
+            return False
 
-    # Merge incoming data with stocks reference data on merge_key.
-    df_merged = df_incoming.merge(
-        df_stocks_subset, on=merge_key, how="left", suffixes=("", "_from_stocks")
-    )
-
-    # For each target column, fill missing values using reference column.
-    for target_field, ref_field in valid_mapping.items():
-        temp_col = f"{ref_field}_from_stocks"
-        if temp_col in df_merged.columns:
-            df_merged[target_field] = df_merged[target_field].fillna(
-                df_merged[temp_col]
-            )
-            df_merged[target_field] = df_merged[target_field].fillna(default_value)
-            df_merged.drop(columns=[temp_col], inplace=True)
-    df_result = df_merged[original_cols].copy()
-    return df_result
-
+    df_holdings_updated = df_holdings_updated[df_holdings_updated['stock_id'].apply(valid_stock_id)]
+    
+    return df_holdings_updated
 
 ##############################################
 # FEATURE ENGINEERING FUNCTIONS
@@ -519,7 +560,7 @@ def main(orgs_csv_path, holdings_csv_path, stocks_csv_path):
     df_orgs = df_orgs.rename(columns={"ticker": "stock_ticker"})  # For consistency.
 
     # --- Preprocess Holdings Data ---
-    # Drop columns that are not required.
+    # Drop columns that are not considered for now.
     df_holdings = df_holdings.drop(
         columns=[
             "source",
@@ -533,9 +574,11 @@ def main(orgs_csv_path, holdings_csv_path, stocks_csv_path):
             "source_date",
         ]
     )
-    # Populate missing fields using stocks.csv.
-    df_holdings = populate_missing_fields_from_stocks(df_holdings, stocks_csv_path)
-    df_holdings = df_holdings.dropna(subset=["stock_ticker"])
+    # Populate missing fields using stocks.csv, namely stock_ticker and stock_id else have to drop if we can't find
+    # BUG 429 NaNs here from ingestion, 429 and expect to degrade performance
+    df_holdings = populate_missing_stock_fields_in_holdings(
+        df_holdings, stocks_csv_path
+    )
 
     # Fill missing market values and percentage fields with 0.
     df_holdings[
@@ -614,14 +657,13 @@ def main(orgs_csv_path, holdings_csv_path, stocks_csv_path):
         columns=["stock_name"]
     )  # stock_id, stock_ticker describes these
 
+
     # --- Feature Engineering on Holdings ---
     df_holdings = engineer_holdings_features(df_holdings)
 
     # --- Preprocess Orgs Data ---
     df_orgs = fill_missing_from_holdings_with_two_matches(df_orgs, df_holdings)
-    df_orgs["stock_ticker"] = df_orgs["stock_ticker"].fillna("Unknown")
-    df_orgs["stock_id"] = df_orgs["stock_id"].fillna(0)
-    df_orgs = df_orgs.dropna(subset=["filer_id"])
+    df_orgs = df_orgs.dropna(subset=["filer_id", "stock_id", "stock_ticker"])
     df_orgs = df_orgs.drop(columns=["cik"])
 
     # --- Feature Engineering on Orgs ---
@@ -648,6 +690,8 @@ def main(orgs_csv_path, holdings_csv_path, stocks_csv_path):
     df_holdings = df_holdings.drop(columns=["org_id", "email_extension"])
     df_orgs = df_orgs.drop(columns=["org_id", "email_extension"])
 
+    # BUG at this point have
+
     # Save the mapping dictionaries to files in your raw folder.
     with open("guilherme/data/raw/org_id_map.pkl", "wb") as f:
         pickle.dump(org_id_map, f)
@@ -658,7 +702,12 @@ def main(orgs_csv_path, holdings_csv_path, stocks_csv_path):
     # CUSTOM ENCODING & SCALING
     ##############################################
     # Define key columns that should remain unchanged after encoding them; stock_ticker and filer_id passed in for ease of reference downstream despite char
-    key_cols_passed = ["org_id_encoded", "email_extension_encoded", "stock_ticker", "filer_id"]
+    key_cols_passed = [
+        "org_id_encoded",
+        "email_extension_encoded",
+        "stock_ticker",
+        "filer_id",
+    ]
 
     # For Holdings:
     # Nominal columns to one-hot encode

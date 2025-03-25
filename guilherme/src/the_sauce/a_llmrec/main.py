@@ -18,8 +18,9 @@ if __name__ == "__main__":
 
     # train phase setting
     parser.add_argument("--pretrain_stage1", action="store_true")
-    parser.add_argument("--pretrain_stage2", action="store_true", default=True)
-    parser.add_argument("--inference", action="store_true")
+    parser.add_argument("--pretrain_stage2", action="store_true")
+    parser.add_argument("--inference", action="store_true", default=True)
+    parser.add_argument("--email_extension", type=str, default="cvshealth.com")
 
     # hyperparameters options
     parser.add_argument("--batch_size1", default=64, type=int)

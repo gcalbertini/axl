@@ -126,7 +126,8 @@ def train_model_phase2_(rank, world_size, args):
     random.seed(0)
 
     model = A_llmrec_model(args).to(args.device)
-    phase1_epoch = 150
+    # BUG terrible. should not be hardcoded. come from args.
+    phase1_epoch = 200
     model.load_model(args, phase1_epoch=phase1_epoch)
 
     dataset = data_partition("guilherme/data/processed/sequences.txt")
@@ -190,40 +191,55 @@ def train_model_phase2_(rank, world_size, args):
 
 
 def inference_(rank, world_size, args):
+    # If using multiple GPUs, set up distributed data parallel (DDP) environment.
     if args.multi_gpu:
         setup_ddp(rank, world_size)
+        # Each process uses a specific GPU (e.g., cuda:0, cuda:1, etc.).
         args.device = "cuda:" + str(rank)
 
+    # Initialize the A-LLMRec model with provided arguments and move it to the designated device.
     model = A_llmrec_model(args).to(args.device)
-    phase1_epoch = 10
+    # BUG: The following magic numbers are hard-coded for the model checkpoints.
+    #       In practice, these should be set via configuration.
+    phase1_epoch = 120
     phase2_epoch = 5
+    # Load pre-trained model weights for both Phase 1 (collaborative filtering) and Phase 2 (LLM alignment).
     model.load_model(args, phase1_epoch=phase1_epoch, phase2_epoch=phase2_epoch)
 
+    # Partition the dataset: the sequences.txt file contains historical interaction sequences.
     dataset = data_partition("guilherme/data/processed/sequences.txt")
     [user_train, user_valid, user_test, usernum, itemnum] = dataset
     print("user num:", usernum, "item num:", itemnum)
+
+    # Compute the number of batches and the average sequence length for logging.
     num_batch = len(user_train) // args.batch_size_infer
-    cc = 0.0
-    for u in user_train:
-        cc += len(user_train[u])
-    print("average sequence length: %.2f" % (cc / len(user_train)))
+    total_seq_length = sum(len(user_train[u]) for u in user_train)
+    print("average sequence length: %.2f" % (total_seq_length / len(user_train)))
+
+    # Set the model to evaluation mode so that layers like dropout are disabled.
     model.eval()
 
+    # Sample a set of users for inference.
+    # If there are more than 10,000 users, randomly sample 10,000; otherwise, use all.
     if usernum > 10000:
         users = random.sample(range(1, usernum + 1), 10000)
     else:
         users = range(1, usernum + 1)
 
+    # Filter out users that do not have any training or test interactions.
     user_list = []
     for u in users:
         if len(user_train[u]) < 1 or len(user_test[u]) < 1:
             continue
         user_list.append(u)
 
+    # Create an inference dataset from the partitioned data.
     inference_data_set = SeqDataset_Inference(
         user_train, user_valid, user_test, user_list, itemnum, args.maxlen
     )
 
+    # Create the DataLoader for inference.
+    # If using multi-GPU, set up DistributedSampler and wrap the model with DDP.
     if args.multi_gpu:
         inference_data_loader = DataLoader(
             inference_data_set,
@@ -237,7 +253,11 @@ def inference_(rank, world_size, args):
             inference_data_set, batch_size=args.batch_size_infer, pin_memory=True
         )
 
+    # Iterate over the inference data and generate recommendations.
+    # For each batch, convert tensors to numpy arrays and then call the model in "generate" mode.
     for _, data in enumerate(inference_data_loader):
         u, seq, pos, neg = data
         u, seq, pos, neg = u.numpy(), seq.numpy(), pos.numpy(), neg.numpy()
-        model([u, seq, pos, neg, rank], mode="generate")
+        #model([u, seq, pos, neg, rank], mode="generate")
+        model([u, seq, pos, neg, rank], args, mode="generate_target_list_for_company")
+

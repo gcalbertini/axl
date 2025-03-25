@@ -264,11 +264,11 @@ parser.add_argument(
     default="guilherme/data/processed/orgs_processed.csv",
 )
 parser.add_argument("--batch_size", default=64, type=int)
-parser.add_argument("--lr", default=0.002, type=float)
+parser.add_argument("--lr", default=0.0008, type=float)
 parser.add_argument("--maxlen", default=58, type=int)  # around the avg
 parser.add_argument("--hidden_units", default=60, type=int)
 parser.add_argument("--num_blocks", default=2, type=int)
-parser.add_argument("--num_epochs", default=200, type=int)
+parser.add_argument("--num_epochs", default=250, type=int)
 parser.add_argument("--num_heads", default=1, type=int)
 parser.add_argument("--dropout_rate", default=0.5, type=float)
 parser.add_argument("--l2_emb", default=0.0, type=float)
@@ -417,7 +417,7 @@ if __name__ == "__main__":
     """
 
     # --- Training Loop ---
-    for epoch in tqdm(range(epoch_start_idx, args.num_epochs), dynamic_ncols=True):
+    for epoch in tqdm(range(epoch_start_idx, args.num_epochs + 1), dynamic_ncols=True):
         if args.inference_only:
             break
         for step in range(num_batch):
