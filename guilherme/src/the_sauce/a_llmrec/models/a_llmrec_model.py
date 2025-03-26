@@ -219,7 +219,7 @@ class A_llmrec_model(nn.Module):
         # if mode == "generate":
         #    self.generate(data)
         if mode == "generate_target_list_for_company":
-            self.generate_target_list_for_company(args)
+            self.generate_target_lists_for_companies(args)
 
     def pre_train_phase1(self, data, optimizer, batch_iter):
         """
@@ -723,52 +723,50 @@ class A_llmrec_model(nn.Module):
 
         return output_text
 
-    def generate_target_list_for_company(self, args):
+    def generate_target_lists_for_companies(self, args, top_k=10):
         """
-        Generate target lists for each company in company_list.
-        
+        Generate target lists for each company in company_list, but return only the global rationale for each target company.
+
         For each target company (identified by its decoded email extension, e.g. "cvshealth.com"):
         1. Convert the decoded email to its encoded form using the email_extension_map.
-        2. Retrieve the target company's processed information from 
+        2. Retrieve the target company's processed information from
             "guilherme/data/processed/orgs_processed.csv".
-        3. Compute the target company's collaborative filtering (CF) embedding using its stock_id.
-        4. For each investor (using keys from self.text_name_dict["bio"] as investor IDs):
-            - Retrieve the investor's CF embedding via self.get_investor_emb.
-            - Compute a confidence score (via dot product) with the target embedding.
-            - Generate an individual rationale using the LLM via self.compute_rationale.
-        5. Sort the investor list by confidence score in descending order.
-        6. Build a global prompt summarizing the target company information and top investors.
-            Use the LLM (via self.compute_global_rationale) to generate an overall explanation.
-        7. Return a dictionary mapping each company to its target list, including:
-            - investor_scores (list of tuples: (investor_id, confidence_score, rationale))
-            - target_info (company details)
-            - global_rationale (LLM-generated explanation of the target list)
-        
+        3. Compute the target company's CF embedding using its stock_id via self.get_item_emb and
+            self.log_emb_proj.
+        4. Derive the investor list from the keys in self.text_name_dict["bio"].
+        5. For each investor:
+                - Retrieve the investor's CF embedding via self.get_investor_emb.
+                - Compute a confidence score (via dot product) with the target embedding.
+                - (Optionally) Generate an individual rationale.
+        6. Sort the investor list by confidence score in descending order and select the top_k.
+        7. Build a global prompt summarizing the target company information and the top_k investors.
+        8. Generate an overall explanation using self.compute_global_rationale.
+        9. Write out the global rationale to "recommendation_output.txt" in a structured format.
+        10. Return a dictionary mapping each target company's stock_ticker to its global rationale.
+
         Parameters:
-            company_list (list of str): List of decoded email extensions for target companies.
-        
+            args (Namespace): Arguments containing, among other things, a list in args.email_extension.
+            top_k (int): Number of top investors to consider for generating the global rationale (default: 10).
+
         Returns:
-            dict: A dictionary where each key is a decoded company email and the value is a dict:
-                {
-                    "investor_scores": sorted list of (investor_id, confidence_score, individual rationale),
-                    "target_info": dict with the target company's processed info,
-                    "global_rationale": a string explaining the overall reasoning.
-                }
+            dict: A dictionary where each key is the target company's stock_ticker and the value is the global rationale (str).
         """
         import pandas as pd
+        import json
 
-        target_dict = {}
-        company_list = args.email_extension
+        global_rationale_dict = {}
+        company_list = (
+            args.email_extension
+        )  # This should be an iterable (list) of decoded email extensions.
 
-        # 1. Load email extension map.
+        # 1. Load the email extension map.
         with open("guilherme/data/raw/email_extension_map.pkl", "rb") as f:
             email_extension_map = pickle.load(f)
 
         # 2. Load processed orgs data.
         df_orgs = pd.read_csv("guilherme/data/processed/orgs_processed.csv")
-        
-        # 3. Derive investor list from processed investor bios.
-        # The keys of self.text_name_dict["bio"] represent the unique investor IDs.
+
+        # 3. Derive investor list from the keys of self.text_name_dict["bio"].
         investor_list = list(self.text_name_dict.get("bio", {}).keys())
 
         # Process each target company.
@@ -776,138 +774,166 @@ class A_llmrec_model(nn.Module):
             # Convert decoded email to encoded.
             encoded_email = email_extension_map.get(company)
             if encoded_email is None:
-                print(f"Warning: '{company}' not found in email_extension_map. Skipping.")
+                print(
+                    f"Warning: '{company}' not found in email_extension_map. Skipping."
+                )
                 continue
 
             # Filter processed orgs data for the target company.
             target_rows = df_orgs[df_orgs["email_extension_encoded"] == encoded_email]
             if target_rows.empty:
-                print(f"Warning: No company found for encoded email '{encoded_email}'. Skipping {company}.")
+                print(
+                    f"Warning: No company found for encoded email '{encoded_email}'. Skipping {company}."
+                )
                 continue
 
             # Use the first matching row as target info.
             target_info = target_rows.iloc[0].to_dict()
             if "stock_id" not in target_info:
-                print(f"Warning: Target company {company} is missing 'stock_id'. Skipping.")
+                print(
+                    f"Warning: Target company {company} is missing 'stock_id'. Skipping."
+                )
                 continue
 
-            # 4. Compute target company's CF embedding.
+            # 4. Compute the target company's CF embedding.
             target_embedding = self.get_item_emb([target_info["stock_id"]])
-            target_embedding = self.log_emb_proj(target_embedding).squeeze(0)
+            target_embedding = self.log_emb_proj(target_embedding).squeeze(
+                0
+            )  # shape: (embedding_dim,)
 
             investor_scores = []
-            # 5. For each investor, compute confidence score and generate individual rationale.
+            # 5. For each investor, compute confidence score.
             for investor_id in investor_list:
                 investor_emb = self.get_investor_emb(investor_id)
                 confidence_score = torch.dot(investor_emb, target_embedding).item()
-                # Generate individual rationale via LLM.
-                individual_rationale = self.compute_rationale(investor_id, target_info)
-                investor_scores.append((investor_id, confidence_score, individual_rationale))
-            
-            # 6. Sort investors by confidence score (highest first).
-            investor_scores.sort(key=lambda x: x[1], reverse=True)
+                investor_scores.append((investor_id, confidence_score))
 
-            # 7. Build a global prompt for overall rationale.
-            # Use the top 5 investor summaries for context.
-            top_investors = investor_scores[:5]
-            top_info = "; ".join([f"Investor {inv_id}: {rat}" for inv_id, score, rat in top_investors])
+            # 6. Sort the investor scores (highest confidence first) and select top_k.
+            investor_scores.sort(key=lambda x: x[1], reverse=True)
+            top_investors = investor_scores[:top_k]
+
+            # 7. Build a global prompt using the top_k investor summaries.
+            top_info = "; ".join(
+                [
+                    f"Investor {inv_id}: Confidence {score:.4f}"
+                    for inv_id, score in top_investors
+                ]
+            )
             global_prompt = (
-                f"Target Company Info: {target_info}. \n"
-                f"Top Investors: {top_info}. \n"
+                f"Target Company Info: {json.dumps(target_info, indent=4)}\n"
+                f"Top Investors: {top_info}\n"
                 "Based on the above, explain why these investors are likely good targets for this company."
             )
             global_rationale = self.compute_global_rationale(global_prompt)
 
-            # Save the target company's result.
-            target_dict[company] = {
-                "investor_scores": investor_scores,
-                "target_info": target_info,
-                "global_rationale": global_rationale
-            }
+            # 8. Use the target company's stock_ticker as the key.
+            target_key = target_info.get("stock_ticker", company)
+            global_rationale_dict[target_key] = global_rationale
 
-        return target_dict
+        # 9. Write out the global rationales to recommendation_output.txt.
+        with open("recommendation_output.txt", "w") as f:
+            for target, rationale in global_rationale_dict.items():
+                f.write(f"Target Company (Ticker): {target}\n")
+                f.write("Global Rationale:\n")
+                f.write(rationale)
+                f.write("\n" + "=" * 80 + "\n\n")
+
+        # 10. Return the dictionary mapping target stock_ticker to global rationale.
+        # return global_rationale_dict
+
     def compute_global_rationale(self, prompt):
         """
         Generate an overall rationale (explanation) using the LLM based on the provided prompt.
-        
-        The prompt should contain information about the target company (e.g., its stock ticker,
-        bio, etc.) and a summary of the top investors (e.g., their bios or other relevant signals).
-        The LLM generates a natural-language explanation that captures why these investors are likely
-        to be good targets for the company.
-        
+
+        The prompt should contain comprehensive information about the target company (e.g., its stock ticker,
+        bio, etc.) along with a summary of top investors (e.g., their IDs and confidence scores). The LLM then
+        generates a natural-language explanation that captures why these investors are likely good targets
+        for the company.
+
         Parameters:
-            prompt (str): A text string containing the global context for rationale generation.
-        
+            prompt (str): The global prompt containing details for rationale generation.
+
         Returns:
-            str: The rationale generated by the LLM.
+            str: The global rationale generated by the LLM.
         """
         # Ensure the tokenizer pads on the left (if required by the LLM architecture).
         self.llm.llm_tokenizer.padding_side = "left"
-        
-        # Tokenize the prompt.
+
+        # Tokenize the prompt and move the tokens to the appropriate device.
         tokens = self.llm.llm_tokenizer(prompt, return_tensors="pt").to(self.device)
-        
-        # Use the LLM to generate output text.
+
         with torch.no_grad():
-            # Optionally, use mixed precision for faster inference.
+            # Use mixed precision if available on CUDA for faster inference.
             with torch.cuda.amp.autocast(device_type="cuda"):
                 generated_ids = self.llm.llm_model.generate(
                     input_ids=tokens.input_ids,
                     attention_mask=tokens.attention_mask,
-                    max_length=150,          # Maximum length for the generated rationale.
-                    do_sample=True,          # Use sampling for diversity.
-                    temperature=0.7,         # Controls randomness (lower is less random).
-                    num_return_sequences=1   # Generate a single sequence.
+                    max_length=150,  # Maximum length for the generated rationale.
+                    do_sample=True,  # Enable sampling for diversity.
+                    temperature=0.7,  # Controls randomness (lower is less random).
+                    num_return_sequences=1,  # Generate a single output.
                 )
-        
-        # Decode the generated token IDs to a string.
-        rationale = self.llm.llm_tokenizer.decode(generated_ids[0], skip_special_tokens=True)
+
+        # Optionally, convert any token IDs of 0 to the EOS token ID.
+        generated_ids[generated_ids == 0] = self.llm.llm_tokenizer.eos_token_id
+        # Decode the output tokens to a string.
+        rationale = self.llm.llm_tokenizer.decode(
+            generated_ids[0], skip_special_tokens=True
+        )
         return rationale
-    
+
     def get_investor_emb(self, investor_id):
         """
         Retrieve the CF embedding for a given investor.
-        
+
         This function looks up the investor's interaction sequence from self.user_seq_dict,
         converts the sequence into a tensor, passes it through the recsys model's log2feats method,
         and returns the final hidden state as the investor's embedding.
-        
+
         Parameters:
             investor_id (int): The new integer ID for the investor.
-            
+
         Returns:
             A 1D tensor of shape (hidden_units,) representing the investor's CF embedding.
         """
         # Ensure that self.user_seq_dict is loaded.
         if not hasattr(self, "user_seq_dict"):
-            self.user_seq_dict = load_user_sequences("guilherme/data/processed/sequences.txt")
-        
+            self.user_seq_dict = load_user_sequences(
+                "guilherme/data/processed/sequences.txt"
+            )
+
         # Get the interaction sequence for the investor.
         seq = self.user_seq_dict.get(investor_id)
         if seq is None or len(seq) == 0:
-            raise ValueError(f"No interaction sequence found for investor {investor_id}")
-        
+            raise ValueError(
+                f"No interaction sequence found for investor {investor_id}"
+            )
+
         # Convert the sequence (list of item IDs) to a tensor.
         # Here we assume the sequence is already padded to length self.args.maxlen.
         seq_tensor = torch.LongTensor(seq).unsqueeze(0).to("cpu")  # Shape: (1, seq_len)
-        
+
         # Compute the sequence features using the recsys model’s log2feats function.
         # log2feats returns a tensor of shape (1, seq_len, hidden_units).
         log_feats = self.recsys.model.log2feats(seq_tensor)
-        
-        # Use the final hidden state as the investor's representation.
-        investor_emb = log_feats[:, -1, :]  # Shape: (1, hidden_units)
-        
-        # Remove the batch dimension.
-        return investor_emb.squeeze(0)  # Shape: (hidden_units,)
 
-    
+        # Use the final hidden state as the investor's representation.
+        investor_emb = log_feats[:, -1, :].squeeze(0)  # Shape: (hidden_units)
+
+        # Project the investor's embedding into the LLM's space (4096-D).
+        investor_emb_proj = self.log_emb_proj(investor_emb.unsqueeze(0)).squeeze(0)
+
+        # Remove the batch dimension.
+        return investor_emb_proj  # Shape: (hidden_units,)
+
+
 def load_user_sequences(seq_file):
     """
     Load the interaction sequences from a text file where each line has "userid itemid".
     Returns a dictionary mapping user IDs to a list of item IDs.
     """
     from collections import defaultdict
+
     user_seq_dict = defaultdict(list)
     with open(seq_file, "r") as f:
         for line in f:
