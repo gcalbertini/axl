@@ -128,7 +128,7 @@ def train_model_phase2_(rank, world_size, args):
 
     model = A_llmrec_model(args).to(args.device)
     # BUG terrible. should not be hardcoded. come from args.
-    phase1_epoch = 30
+    phase1_epoch = 5
     model.load_model(args, phase1_epoch=phase1_epoch)
 
     dataset = data_partition("guilherme/data/processed/sequences.txt")
@@ -169,6 +169,7 @@ def train_model_phase2_(rank, world_size, args):
             u, seq, pos, neg = u.numpy(), seq.numpy(), pos.numpy(), neg.numpy()
             model(
                 [u, seq, pos, neg],
+                args,
                 optimizer=adam_optimizer,
                 batch_iter=[epoch, args.num_epochs + 1, step, num_batch],
                 mode="phase2",
@@ -203,7 +204,7 @@ def inference_(rank, world_size, args):
     # BUG: The following magic numbers are hard-coded for the model checkpoints.
     #       In practice, these should be set via configuration.
     phase1_epoch = 30
-    phase2_epoch = 4
+    phase2_epoch = 1
     # Load pre-trained model weights for both Phase 1 (collaborative filtering) and Phase 2 (LLM alignment).
     model.load_model(args, phase1_epoch=phase1_epoch, phase2_epoch=phase2_epoch)
 

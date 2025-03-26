@@ -387,10 +387,10 @@ class A_llmrec_model(nn.Module):
 
         # Use tqdm.write to print out the loss summary (this integrates nicely with the progress bar).
         tqdm.write(
-            "Epoch {}/{} Iteration {}/{}: Mean loss: {:.4f} / BPR loss: {:.4f} / Matching loss: {:.4f} / "
-            "Item reconstruction: {:.4f} / Text reconstruction: {:.4f}".format(
+            "Epoch {}/{} Iteration {}/{}: Mean loss: {:.5f} / BPR loss: {:.5f} / Matching loss: {:.5f} / "
+            "Item reconstruction: {:.5f} / Text reconstruction: {:.5f}".format(
                 epoch,
-                total_epoch,
+                total_epoch - 1,
                 step,
                 total_step,
                 avg_mean_loss,
@@ -445,7 +445,7 @@ class A_llmrec_model(nn.Module):
 
         return ",".join(candidate_text), candidate_ids
 
-    def pre_train_phase2(self, data, optimizer, batch_iter):
+    def pre_train_phase2(self, data, args, optimizer, batch_iter):
         """
         Pre-train Phase 2 for the A-LLMRec model in our stock recommendation problem.
 
@@ -496,13 +496,13 @@ class A_llmrec_model(nn.Module):
         for i in tqdm(
             range(num_users), desc="Phase2 iterations", leave=False, dynamic_ncols=True
         ):
-            # For each user, use the last positive stock as the target.
+            # For each investor, use the last positive stock interaction as the target.
             target_item_id = pos[i][-1]
             target_item_title = self.find_item_text_single(
                 target_item_id, title_flag=True, description_flag=False
             )
 
-            # Generate text summary of historical stock interactions.
+            # Generate a textual summary of the investor's historical stock interactions.
             interact_text, interact_ids = self.make_interact_text(
                 seq[i][seq[i] > 0], 10
             )
@@ -512,23 +512,21 @@ class A_llmrec_model(nn.Module):
                 seq[i][seq[i] > 0], candidate_num, target_item_id, target_item_title
             )
 
-            # Replace self.get_user_info with your method to obtain a meaningful investor description.
-            user_info = (
-                self.get_user_info(u[i])
-                if hasattr(self, "get_user_info")
-                else "Investor"
-            )
+            # Get investor (user) info via the updated get_user_info function.
+            user_info = self.get_user_info(u[i])
 
             # Build the input prompt for the LLM.
-            input_text = user_info + " is a user representation. "
-            input_text += "This investor has held " + interact_text
-            input_text += " in the past. Recommend one next stock for this investor to invest in from the following stock ticker set, "
-            input_text += candidate_text + ". The recommendation is "
+            input_text = user_info + " is an investor representation. "
+            input_text += (
+                "This investor has held the following stocks: " + interact_text
+            )
+            input_text += " in the past. Recommend a list of 10 next stocks for this investor from the following candidate set: "
+            input_text += candidate_text + ". The recommended list is "
 
             text_input.append(input_text)
             text_output.append(target_item_title)
 
-            # Retrieve item embeddings for the investor's historical stocks and candidate set.
+            # Retrieve and project item embeddings for historical stocks and candidate stocks.
             interact_emb = self.get_item_emb(interact_ids)
             candidate_emb = self.get_item_emb(candidate_ids)
             interact_embs.append(self.item_emb_proj(interact_emb))
@@ -544,50 +542,85 @@ class A_llmrec_model(nn.Module):
 
         # Project the CF embeddings using the log embedding projection.
         log_emb_proj = self.log_emb_proj(log_emb)
-        # Compute the loss from the LLM module which aligns the collaborative and text representations.
+        # Compute the loss from the LLM module which aligns the CF and text representations.
         loss_rm = self.llm(log_emb_proj, samples)
         loss_rm.backward()
         optimizer.step()
 
-        """
-        NOTE I guess this is intention as batch size was small since you run out of vram for this phase > 16 on even 1x A100?
-        In this Phase 2 implementation, the loss is computed for the entire batch in a single
-        forward pass rather than accumulating losses over multiple mini-batches. In other words,
-        instead of summing loss values over several iterations and then dividing by the number of iterations
-        (as in Phase 1), the function calls the LLM once over the whole batch to obtain a single loss value (loss_rm). 
-        This loss value is then used directly (and added to mean_loss) without dividing by the number of iterations.
-        If it was intended to average the loss per user, you would need to divide by the number of users (i.e. len(u))—but as
-        implemented, loss_rm represents the aggregate loss over the *entire* batch.
-        """
-        mean_loss += loss_rm.item() / len(
-            u
-        )  # TODO may be too small for several users and won't display well ~0
+        mean_loss += loss_rm.item()
 
-        # Output the loss summary using tqdm.write for clean integration with the progress bar.
         tqdm.write(
             "A-LLMRec model loss in epoch {}/{} iteration {}/{}: {:.5f}".format(
                 epoch, total_epoch - 1, step, total_step, mean_loss
-            ),
+            )
         )
+
+    def get_user_info(self, user_tensor):
+        """
+        Return a textual summary for the investor based on user metadata.
+        Loads the metadata from the gzipped pickle file if it hasn't been loaded already.
+        """
+        # Load user metadata if not already loaded.
+        if not hasattr(self, "user_meta_dict"):
+            with gzip.open(
+                "guilherme/data/processed/filers_org_dict.pkl.gz", "rb"
+            ) as tf:
+                self.user_meta_dict = pickle.load(tf)
+
+        # Convert the user_tensor (assumed to be an integer or a tensor with one value)
+        new_id = int(user_tensor)
+
+        # Retrieve investor metadata from the loaded user_meta_dict.
+        parts = []
+        if new_id in self.user_meta_dict:
+            investor_name = self.user_meta_dict[new_id].get(
+                "investor_name", "Unknown investor"
+            )
+            # Check if investor_name is a NumPy array and extract the first element if necessary.
+            if isinstance(investor_name, np.ndarray):
+                investor_name = (
+                    investor_name.item()
+                    if investor_name.size == 1
+                    else investor_name[0]
+                )
+            elif isinstance(investor_name, torch.Tensor):
+                investor_name = (
+                    investor_name.item()
+                    if investor_name.dim() == 0
+                    else investor_name[0].item()
+                )
+
+            parts.append(investor_name)
+            filer_id = self.user_meta_dict[new_id].get("filer_id", "Unknown filer")
+            # Check if filer_id is a NumPy array and extract the first element if necessary.
+            if isinstance(filer_id, np.ndarray):
+                filer_id = filer_id.item() if filer_id.size == 1 else filer_id[0]
+            elif isinstance(filer_id, torch.Tensor):
+                filer_id = (
+                    filer_id.item() if filer_id.dim() == 0 else filer_id[0].item()
+                )
+
+            parts.append(str(int(filer_id)))
+            return f'"Investor {investor_name} (filer id: {str(int(filer_id))})"'
+        else:
+            return f"Investor (DATA MISSING POST-PROCESSING)"
 
     def generate_target_lists_for_companies(self, args, top_k=10):
         """
         Generate target investor lists for companies using 13D data. This version loads investor
         interaction sequences from a preprocessed file and uses them to compute investor embeddings.
-        
+
         Args:
             args: Should include 'email_extension' (list of decoded email extensions) and 'seq_file' path.
             top_k: Number of top investors to return for each company.
-            
+
         Returns:
             dict: Mapping each company (by descriptive text) to a list of candidate investors with confidence scores.
         """
         outputs = {}
+        import pandas as pd
 
-        # Load investor interaction sequences from the preprocessed file.
-        investor_log_seqs = load_investor_log_seqs("guilherme/data/processed/sequences.txt", self.maxlen)
-
-        # Retrieve company list from args.email_extension.
+        # Only consider companies provided as input.
         company_list = args.email_extension
 
         # 1. Load the email extension map.
@@ -595,59 +628,117 @@ class A_llmrec_model(nn.Module):
             email_extension_map = pickle.load(f)
 
         # 2. Load processed organization data.
-        import pandas as pd
         df_orgs = pd.read_csv("guilherme/data/processed/orgs_processed.csv")
 
-        # 3. Derive candidate investor IDs from the keys of self.text_name_dict["bio"].
-        candidate_investor_ids = list(self.text_name_dict.get("bio", {}).keys())
+        # 3. Load candidate investor IDs from user_meta_dict.
+        if not hasattr(self, "user_meta_dict"):
+            with gzip.open(
+                "guilherme/data/processed/filers_org_dict.pkl.gz", "rb"
+            ) as tf:
+                self.user_meta_dict = pickle.load(tf)
+        candidate_investor_ids = list(
+            {
+                item["filer_id"]
+                for item in self.user_meta_dict.values()
+                if "filer_id" in item
+            }
+        )
 
-        # Process each target company.
+        # Process each target company (only the ones provided in company_list).
         for company in company_list:
+            # Convert decoded email to encoded.
             encoded_email = email_extension_map.get(company)
             if encoded_email is None:
-                print(f"Warning: '{company}' not found in email_extension_map. Skipping.")
+                print(
+                    f"Warning: '{company}' not found in email_extension_map. Skipping."
+                )
                 continue
 
+            # Filter orgs data for the target company.
             target_rows = df_orgs[df_orgs["email_extension_encoded"] == encoded_email]
             if target_rows.empty:
-                print(f"Warning: No company found for encoded email '{encoded_email}'. Skipping {company}.")
+                print(
+                    f"Warning: No company found for encoded email '{encoded_email}'. Skipping {company}."
+                )
                 continue
 
-            company_id = target_rows.iloc[0]["company_id"] if "company_id" in target_rows.columns else encoded_email
+            # Use the first matching row as target info.
+            target_info = target_rows.iloc[0].to_dict()
+            if "stock_id" not in target_info:
+                print(
+                    f"Warning: Target company {company} is missing 'stock_id'. Skipping."
+                )
+                continue
+
+            # 4. Compute the target company's CF embedding.
+            company_id = target_info["stock_id"]
+            company_emb = self.get_item_emb([company_id])
+            company_repr = self.log_emb_proj(company_emb).squeeze(
+                0
+            )  # shape: (proj_dim,)
 
             # Get company representation.
             company_emb = self.get_item_emb([company_id])
             company_repr = self.log_emb_proj(company_emb)
 
             # Compute candidate investor embeddings using the loaded investor_log_seqs.
-            investor_embs = self.get_investor_emb(candidate_investor_ids, investor_log_seqs)
+            investor_log_seqs = load_investor_log_seqs(
+                "guilherme/data/processed/sequences.txt", self.maxlen
+            )
+            investor_embs = self.get_investor_emb(
+                candidate_investor_ids, investor_log_seqs
+            )
             investor_embs_proj = self.item_emb_proj(investor_embs)
+            # 5. Compute candidate investor embeddings.
+            # get_investor_emb can accept a list of investor IDs along with investor_log_seqs.
+            # (Alternatively, you can loop over candidate_investor_ids and build a tensor)
+            investor_embs = self.get_investor_emb(
+                candidate_investor_ids, investor_log_seqs
+            )  # shape: (num_candidates, proj_dim)
+            investor_embs_proj = self.item_emb_proj(
+                investor_embs
+            )  # Ensure same space as company_repr
 
-            # Compute similarity scores.
-            scores = torch.matmul(company_repr, investor_embs_proj.t()).squeeze(0)
+            # 6. Compute similarity scores between the target and each candidate investor.
+            # Use torch.matmul: result shape is (1, num_candidates); then squeeze to (num_candidates,)
+            scores = torch.matmul(
+                company_repr.unsqueeze(0), investor_embs_proj.t()
+            ).squeeze(0)
             confidence_scores = torch.softmax(scores, dim=0) * 100
 
-            top_scores, top_indices = torch.topk(confidence_scores, k=min(top_k, confidence_scores.size(0)))
-            target_list = []
+            # 7. Select top_k investors.
+            top_scores, top_indices = torch.topk(
+                confidence_scores, k=min(top_k, confidence_scores.size(0))
+            )
+            candidate_list = []
             for idx, score in zip(top_indices, top_scores):
-                investor_name = self.get_investor_name(candidate_investor_ids[idx])
-                rationale = f"Investor {investor_name} shows strong signals from recent 13D filings."
-                target_list.append({
-                    "investor": investor_name,
-                    "confidence": round(float(score), 2),
-                    "rationale": rationale,
-                })
+                investor_id = candidate_investor_ids[idx]
+                investor_name = self.get_user_info(investor_id)
+                rationale = f"{investor_name} shows strong affinity based on recent 13D filings."  # You can refine this rationale.
+                candidate_list.append(
+                    {
+                        "investor": investor_name,
+                        "confidence": round(float(score.item()), 2),
+                        "rationale": rationale,
+                    }
+                )
 
-            company_text = self.find_item_text_single(company_id, title_flag=True, description_flag=False)
-            outputs[company_text] = target_list
+            # 8. Get a descriptive text for the target company -- ticker?
+            company_text =  target_info["stock_ticker"]
+            outputs[company_text] = candidate_list
 
-            with open('./investor_target_lists.txt', 'a') as f:
+            # 9. Write results out to file.
+            import json
+
+            with open("./investor_target_lists.txt", "a") as f:
                 f.write(f"Company: {company_text}\n")
-                f.write("Target Investors: " + str(target_list) + "\n\n")
-                
+                f.write("Target Investors:\n")
+                f.write(json.dumps(candidate_list, indent=4))
+                f.write("\n" + "=" * 80 + "\n\n")
+
+        # 10. Return the output dictionary.
         return outputs
 
-   
     def get_investor_emb(self, investor_ids, investor_log_seqs):
         """
         Given a list of investor IDs and an external mapping (investor_log_seqs) of investor
@@ -656,8 +747,8 @@ class A_llmrec_model(nn.Module):
 
         Args:
             investor_ids (list): List of investor IDs (e.g., new integer IDs).
-            investor_log_seqs (dict): Mapping from investor ID to a padded list of item IDs.
-            
+            investor_log_seqs (dict): Mapping from investor ID to a list of item IDs.
+
         Returns:
             torch.Tensor: Investor embeddings with shape [N, hidden_units].
         """
@@ -670,7 +761,7 @@ class A_llmrec_model(nn.Module):
                 emb = torch.zeros(self.recsys.hidden_units).to(self.device)
             else:
                 # Convert the sequence to a tensor of shape [1, maxlen]
-                
+
                 log_seq_tensor = torch.LongTensor([log_seq]).to("cpu")
                 # Compute the hidden states for the sequence.
                 log_feats = self.recsys.model.log2feats(log_seq_tensor)
@@ -679,63 +770,20 @@ class A_llmrec_model(nn.Module):
             investor_embs.append(emb)
         return torch.stack(investor_embs, dim=0)
 
- 
-    def get_investor_emb2(self, investor_id):
-        """
-        Retrieve the CF embedding for a given investor.
-
-        This function looks up the investor's interaction sequence from self.user_seq_dict,
-        converts the sequence into a tensor, passes it through the recsys model's log2feats method,
-        and returns the final hidden state as the investor's embedding.
-
-        Parameters:
-            investor_id (int): The new integer ID for the investor.
-
-        Returns:
-            A 1D tensor of shape (hidden_units,) representing the investor's CF embedding.
-        """
-        # Ensure that self.user_seq_dict is loaded.
-        if not hasattr(self, "user_seq_dict"):
-            self.user_seq_dict = load_user_sequences(
-                "guilherme/data/processed/sequences.txt"
-            )
-
-        # Get the interaction sequence for the investor.
-        seq = self.user_seq_dict.get(investor_id)
-        if seq is None or len(seq) == 0:
-            raise ValueError(
-                f"No interaction sequence found for investor {investor_id}"
-            )
-
-        # Convert the sequence (list of item IDs) to a tensor.
-        # Here we assume the sequence is already padded to length self.args.maxlen.
-        seq_tensor = torch.LongTensor(seq).unsqueeze(0).to("cpu")  # Shape: (1, seq_len)
-
-        # Compute the sequence features using the recsys model’s log2feats function.
-        # log2feats returns a tensor of shape (1, seq_len, hidden_units).
-        log_feats = self.recsys.model.log2feats(seq_tensor)
-
-        # Use the final hidden state as the investor's representation.
-        investor_emb = log_feats[:, -1, :].squeeze(0)  # Shape: (hidden_units)
-
-        # Project the investor's embedding into the LLM's space (4096-D).
-        investor_emb_proj = self.log_emb_proj(investor_emb.unsqueeze(0)).squeeze(0)
-
-        # Remove the batch dimension.
-        return investor_emb_proj  # Shape: (hidden_units,)
-
-
 def load_investor_log_seqs(seq_file, maxlen):
     """
     Load investor interaction sequences from a text file and return a dictionary mapping each investor
-    (user id) to their list of item ids. Each line in the file is expected to be "userid itemid".
-    
+    (user id) to their list of item ids, truncated to maxlen if the sequence exceeds that length.
+
+    Each line in the file is expected to be "userid itemid".
+
     Args:
         seq_file (str): Path to the sequences file.
-        maxlen (int): Maximum sequence length for padding (or truncating) each user's sequence.
-        
+        maxlen (int): Maximum sequence length. Sequences longer than maxlen are truncated to the most recent maxlen interactions.
+                      Sequences shorter than maxlen remain unchanged.
+
     Returns:
-        dict: Mapping from investor (user) id to a padded list of item ids (length = maxlen).
+        dict: Mapping from investor (user) id to a list of item ids (truncated to maxlen if necessary).
     """
     investor_log_seqs = {}
     with open(seq_file, "r") as f:
@@ -747,13 +795,11 @@ def load_investor_log_seqs(seq_file, maxlen):
             if user_id not in investor_log_seqs:
                 investor_log_seqs[user_id] = []
             investor_log_seqs[user_id].append(item_id)
-    
-    # Pad (or truncate) each sequence to the specified maxlen.
+
+    # Truncate each sequence to the specified maxlen if necessary.
     for user_id, seq in investor_log_seqs.items():
-        if len(seq) < maxlen:
-            # Pad with zeros (assuming 0 is the padding index)
-            seq = seq + [0] * (maxlen - len(seq))
-        else:
+        if len(seq) > maxlen:
             seq = seq[-maxlen:]  # take the most recent maxlen interactions
         investor_log_seqs[user_id] = seq
+
     return investor_log_seqs

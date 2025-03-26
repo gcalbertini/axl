@@ -1,0 +1,110 @@
+Company: CVS
+Target Investors:
+[
+    {
+        "investor": "Investor (DATA MISSING POST-PROCESSING)",
+        "confidence": 100.0,
+        "rationale": "Investor (DATA MISSING POST-PROCESSING) shows strong affinity based on recent 13D filings."
+    }
+]
+================================================================================
+
+Company: BAX
+Target Investors:
+[
+    {
+        "investor": "Investor (DATA MISSING POST-PROCESSING)",
+        "confidence": 100.0,
+        "rationale": "Investor (DATA MISSING POST-PROCESSING) shows strong affinity based on recent 13D filings."
+    }
+]
+================================================================================
+
+Company: NFLX
+Target Investors:
+[
+    {
+        "investor": "Investor (DATA MISSING POST-PROCESSING)",
+        "confidence": 100.0,
+        "rationale": "Investor (DATA MISSING POST-PROCESSING) shows strong affinity based on recent 13D filings."
+    }
+]
+================================================================================
+
+Company: CVS
+Target Investors:
+[
+    {
+        "investor": "Investor (DATA MISSING POST-PROCESSING)",
+        "confidence": 100.0,
+        "rationale": "Investor (DATA MISSING POST-PROCESSING) shows strong affinity based on recent 13D filings."
+    }
+]
+================================================================================
+
+Company: BAX
+Target Investors:
+[
+    {
+        "investor": "Investor (DATA MISSING POST-PROCESSING)",
+        "confidence": 100.0,
+        "rationale": "Investor (DATA MISSING POST-PROCESSING) shows strong affinity based on recent 13D filings."
+    }
+]
+================================================================================
+
+Company: NFLX
+Target Investors:
+[
+    {
+        "investor": "Investor (DATA MISSING POST-PROCESSING)",
+        "confidence": 100.0,
+        "rationale": "Investor (DATA MISSING POST-PROCESSING) shows strong affinity based on recent 13D filings."
+    }
+]
+================================================================================
+
+Company: CVS
+Target Investors:
+[
+    {
+        "investor": "Investor (DATA MISSING POST-PROCESSING)",
+        "confidence": 100.0,
+        "rationale": "Investor (DATA MISSING POST-PROCESSING) shows strong affinity based on recent 13D filings."
+    }
+]
+================================================================================
+
+Company: BAX
+Target Investors:
+[
+    {
+        "investor": "Investor (DATA MISSING POST-PROCESSING)",
+        "confidence": 100.0,
+        "rationale": "Investor (DATA MISSING POST-PROCESSING) shows strong affinity based on recent 13D filings."
+    }
+]
+================================================================================
+
+Company: NFLX
+Target Investors:
+[
+    {
+        "investor": "Investor (DATA MISSING POST-PROCESSING)",
+        "confidence": 100.0,
+        "rationale": "Investor (DATA MISSING POST-PROCESSING) shows strong affinity based on recent 13D filings."
+    }
+]
+================================================================================
+
+Company: CVS
+Target Investors:
+[
+    {
+        "investor": "Investor (DATA MISSING POST-PROCESSING)",
+        "confidence": 100.0,
+        "rationale": "Investor (DATA MISSING POST-PROCESSING) shows strong affinity based on recent 13D filings."
+    }
+]
+================================================================================
+

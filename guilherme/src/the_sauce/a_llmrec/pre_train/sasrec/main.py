@@ -222,10 +222,24 @@ def preprocess(df_holdings, processed_org_path, seq_out_file):
             "company_name": company_name,
         }
     print(f"Missing {missing_count} item (stock) bios!")
+
+    user_meta_dict = {}
+    df_filer = pd.read_csv("guilherme/data/raw/filers.csv")
+    for user_id, new_id in usermap.items():
+        investor_row = df_filer[df_filer["id"] == user_id]
+        investor_name = investor_row["name"]
+        filer_id = user_id
+        user_meta_dict[new_id] = {"investor_name": investor_name, "filer_id": filer_id}
+
     # Save the org_dict as a gzipped pickle file.
     org_dict_path = "guilherme/data/processed/holdings_org_dict.pkl.gz"
     with gzip.open(org_dict_path, "wb") as tf:
         pickle.dump(item_meta_dict, tf)
+
+    # Save the org_dict as a gzipped pickle file.
+    org_dict_path = "guilherme/data/processed/filers_org_dict.pkl.gz"
+    with gzip.open(org_dict_path, "wb") as tf:
+        pickle.dump(user_meta_dict, tf)
 
     print("Total new investor IDs:", usernum, "Total new stock IDs:", itemnum)
 
