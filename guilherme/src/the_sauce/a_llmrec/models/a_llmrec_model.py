@@ -215,7 +215,7 @@ class A_llmrec_model(nn.Module):
         if mode == "phase1":
             self.pre_train_phase1(data, optimizer, batch_iter)
         if mode == "phase2":
-            self.pre_train_phase2(data, optimizer, batch_iter)
+            self.pre_train_phase2(data, args, optimizer, batch_iter)
         # if mode == "generate":
         #    self.generate(data)
         if mode == "generate_target_lists_for_companies":
@@ -646,8 +646,6 @@ class A_llmrec_model(nn.Module):
                 f.write("Target Investors: " + str(target_list) + "\n\n")
                 
         return outputs
-
-
 
    
     def get_investor_emb(self, investor_ids, investor_log_seqs):
