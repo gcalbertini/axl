@@ -259,5 +259,5 @@ def inference_(rank, world_size, args):
         u, seq, pos, neg = data
         u, seq, pos, neg = u.numpy(), seq.numpy(), pos.numpy(), neg.numpy()
         #model([u, seq, pos, neg, rank], mode="generate")
-        model([u, seq, pos, neg, rank], args, mode="generate_target_list_for_company")
+        model([u, seq, pos, neg, rank], args, mode="generate_target_lists_for_companies")
 
