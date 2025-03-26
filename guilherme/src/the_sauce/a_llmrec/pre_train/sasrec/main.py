@@ -19,87 +19,70 @@ from utils import (
 """
 NOTE GENERAL DISCUSSION:
 
-In this assignment, the goal is to generate target lists—that is, to produce ranked recommendations of companies that customers 
-(e.g., investment teams) should reach out to. Here's how this fits into our data:
+In this assignment, the objective is to generate target lists—that is, to produce ranked recommendations 
+of investors who are likely to invest in a specific company (represented by its stock ticker). 
 
     Investor Holdings as Implicit Behavior:
-    The holdings table records past investments (or positions) by institutional investors. 
-    This data reflects each investor's historical behavior and preferences—essentially, which companies they have invested in.
+    The holdings table records past investments (or positions) made by institutional investors. This data 
+    reflects each investor's historical behavior and preferences—specifically, which companies they have 
+    invested in.
 
     Building Sequential Interaction Data:
-    By grouping the holdings by org_id_encoded (investor) and ordering the interactions (even if only by row order -- see BUG below), 
-    you create a sequence of investments for each investor. This sequence is used to train a sequential recommendation 
-    model (like SASRec). The model learns the typical progression or patterns in an investor's portfolio.
+    By grouping the holdings by investor (org_id_encoded) and ordering their transactions (using row order, 
+    as the timestamp data is currently not available), you can create a sequence of investments for each investor. 
+    This sequence is used to train a sequential recommendation model (like SASRec). The model learns the typical 
+    progression or patterns in an investor's portfolio.
 
     Generating Target Lists:
-    Once trained, the model can predict the “next” company an investor might be interested in, based on their 
-    past investment sequence. For each investor, the model outputs a ranked list of companies with associated scores (confidence levels).
-    These ranked lists are the target lists that our group will provide to customers, advising them on which investors to reach out to regarding
-    a specific company (e.g., cvshealth.com, baxter.com, netflix.com).
+    Once trained, the OG A-LLMRec model predicts the “next” company each investor might invest in, based solely on their 
+    historical investment sequence. For our case, given target company (e.g., cvshealth.com, baxter.com, netflix.com), 
+    the model outputs a ranked list of investors, each with an associated confidence score indicating how likely 
+    it is that the investor will invest in that company. These ranked lists are the target lists that we provide 
+    to customers, advising them on which investors to approach regarding the target company.
 
     Evaluation with HR and NDCG:
-        HR@k: Measures whether the investor's actual next investment (or the most relevant company) appears in the top-k recommendations.
-        NDCG@k: Evaluates not only if the target appears, but how high it is ranked in the list, providing a nuanced view of the quality of the ranking.
+        HR@k (Hit Ratio): Measures the proportion of investors for whom the target company appears within the 
+        top-k predictions of the model. A high HR@k indicates that many investors are correctly predicted to 
+        eventually invest in the target company.
+        NDCG@k (Normalized Discounted Cumulative Gain): Evaluates not only if the target company appears in the 
+        list, but also how high it is ranked. This metric gives a more nuanced view of ranking quality, ensuring 
+        that the most promising investor candidates are placed at the top of the target list.
 
-In Short
-    Data Source: Holdings data capture past investor behavior.
-    Processing: You build sequential interaction data (per investor) and train a model to predict the next investment.
-    Output: The model produces a ranked list (target list) with confidence scores for each investor.
-    Customer Value: These target lists guide customers on which investors might be receptive to outreach, 
-    based on historical behavior.
+In Short:
+    Data Source: Holdings data capturing past investor behavior.
+    Processing: You build sequential interaction data per investor and train a model (e.g., SASRec) to predict 
+                the next company they might invest in.
+    Output: For a given target company, the model produces a ranked list (target list) of investors with 
+            confidence scores.
+    Customer Value: These target lists help customers (e.g., investment teams) focus outreach on investors 
+                    who are most likely to be interested in the target company based on their historical behavior.
 
-Thus, the recommendation process leverages our holdings data to generate actionable target lists for customers, 
-and evaluation metrics like HR and NDCG help ensure these lists are both accurate and well-ranked.
 
-NOTE When you use historical interactions to enrich your collaborative filtering model,
-the core idea is that you're learning user and item embeddings based solely on past behaviour. 
-However, the engineered features of the org (such as additional metadata, textual descriptions, 
-or other curated signals) part of the user tower are designed to provide extra context that 
-might not be fully captured by interactions alone.Even if you don't have explicit org features, 
-the fact that an organization has held certain stocks provides a strong implicit signal about its interests. 
-The model uses these signals to position both users and items in a latent space, where similar users and
-similar stocks end up close together.
-
-"""
-
-"""
 NOTE TECHNICAL DISCUSSION:
 
-NOTE: In a standard SASRec setup, the focus is on the interaction sequences 
-derived from holdings. The orgs data (which might include bios and other dictdata) 
-can later be used to enrich user representations in a hybrid or two-tower model 
-(e.g., A-LLMRec). For SASRec alone, however, the sequential examples are the primary input.
-MAJOR BUG Timestamp data is all wrong (all the same) so this is all assuming order inherent in CSV for transactions 
+NOTE: In a standard SASRec setup, the model is trained on sequences derived from investors' past holdings 
+(interaction data). Here, the sequential examples consist of each investor's ordered list of investments. 
+The orgs data (which may include bios and other metadata) could later be used to enrich the investor representations 
+in a hybrid or two-tower model (e.g., A-LLMRec). For SASRec alone, however, the primary input is the sequential data.
 
-NOTE CONSIDER GIVING CANDIDATES TIMESTAMP DATA!!
+MAJOR BUG: 
+The timestamp data in our CSV is not reliable (all values are the same), so the current ordering of transactions 
+is based solely on the row order in the CSV. Consider providing or engineering proper timestamp data to ensure 
+accurate temporal ordering.
 
-In the context of this assignment, HR (Hit Ratio) and NDCG (Normalized Discounted Cumulative Gain)
- are used to evaluate how well our recommender system—based on 13D data—generates target lists 
- for companies with confidence scores for each investor.
+Evaluation:
+    In the context of this assignment, HR@k and NDCG@k are used to evaluate how well the recommender system 
+    generates target lists of investors for a given target company.
+        - HR@k: Checks if the target company (i.e., the one the investor eventually invests in) appears within 
+          the top-k predicted companies for that investor. When filtering by the target company, it tells you if 
+          the investor is a good candidate.
+        - NDCG@k: Measures not only the presence but also the ranking of the target company in the list. A higher 
+          rank (closer to the top) contributes more to NDCG, indicating that the investor is highly likely to invest 
+          in the target company.
 
-    Hit Ratio (HR@k):
-        Purpose: HR@k measures the proportion of investors for whom the actual target company (the one they eventually invested in)
-          appears within the top-k recommendations.
-        **If  system is tasked with generating target lists for companies (e.g., cvshealth.com, baxter.com, netflix.com), HR@k tells you whether the system
-          is retrieving the correct companies among the top candidates for each investor. A high HR@k means
-          that a large fraction of investors have the correct target company in their top-k list.
-
-    Normalized Discounted Cumulative Gain (NDCG@k):
-        Purpose: NDCG@k takes into account not only whether the target is 
-        present but also its position in the recommendation list. It assigns higher scores when the target is ranked closer to the top.
-        **In generating target lists with confidence scores, it's not enough just to include the right companies—the order matters.
-          Investors are more likely to act on items that appear at the top of a ranked list. NDCG@k helps measure how well 
-          our system ranks the most relevant companies. If the target company is placed high in the list, 
-          it contributes to a higher NDCG score, indicating a more effective recommendation.
-
-
-When you run the model (such as SASRec or a two-tower model like A-LLMRec), you can compute these metrics on the test or validation set. For each investor:
-
-    HR@k: Check if the actual next investment (or the company we're targeting) is within the top-k recommendations.
-    NDCG@k: Calculate a weighted gain based on the rank of the target company, normalized by the best possible ranking.
-
-You can think of these as confidence scores in this recsys setting.
-
+When running the model (such as SASRec or a two-tower model like A-LLMRec), these metrics are computed on the test 
+or validation set by comparing the predicted “next investment” for each investor to the actual target company. 
+This process results in confidence scores for each investor regarding their likelihood to invest in the target company.
 """
 
 
@@ -135,119 +118,137 @@ def read_csv_with_progress(filename, chunksize=256, total_rows=None):
     return df
 
 
-def preprocess(df, processed_org_path, seq_out_file):
+def preprocess(df_holdings, processed_org_path, seq_out_file):
     """
     Process the holdings CSV file to generate:
       - Counts of interactions per investor and per company.
       - Mapping dictionaries (usermap and itemmap) to assign new integer IDs.
-      - A User dictionary mapping each new investor ID to a list of interactions,
-        where each interaction is represented as [timestamp, itemid].
-        Since no timestamp is available, we assign one by incrementing a counter.
-      - An org_dict dictionary mapping each new investor ID to dict information
-        obtained from the orgs CSV (using the 'bio' field and optionally 'ticker').
+      - A User dictionary mapping each new investor ID (derived from the original filer_id)
+        to a list of interactions, where each interaction is represented as [timestamp, itemid].
+        Since no real timestamp is available, we assign one by incrementing a counter.
+      - An org_dict dictionary mapping each new investor ID to metadata obtained from the orgs CSV
+        (using the 'bio' field and optionally 'stock_ticker').
+
+    Note:
+      In our holdings data, "org_id" or "org_id_encoded" does NOT represent the investor;
+      the investor is identified by "filer_id". Thus, we use "filer_id" as the key for building
+      the investor (user) mappings.
 
     The function also saves:
       - org_dict as a gzipped pickle file.
       - A text file with one interaction per line in the format "userid itemid".
 
-      User (dict): Mapping from new investor IDs to lists of interactions.
-      usermap (dict): Mapping from original org_id to new integer IDs.
+      User (dict): Mapping from new investor IDs (derived from filer_id) to lists of interactions over "time".
+      usermap (dict): Mapping from original filer_id to new integer IDs.
       itemmap (dict): Mapping from original stock_id to new integer IDs.
     """
-    countU = defaultdict(int)
-    countP = defaultdict(int)
+    from collections import defaultdict
+    import pandas as pd
+    import gzip, pickle
 
-    # First pass: count interactions.
-    for idx, row in df.iterrows():
-        org = row["org_id_encoded"]
+    # --- Counting interactions from df_holdings ---
+    countU = defaultdict(int)  # Investor interaction counts (using filer_id)
+    countP = defaultdict(int)  # Company interaction counts (using stock_id)
+    for idx, row in df_holdings.iterrows():
+        investor = row["filer_id"]
         stock = row["stock_id"]
-        countU[org] += 1
+        countU[investor] += 1
         countP[stock] += 1
 
-    usermap = {}
+    # --- Building mappings and sequential data ---
+    usermap = {}  # Maps original filer_id to new integer investor IDs.
+    itemmap = {}  # Maps original stock_id to new integer stock IDs.
+    User = {}  # Maps new investor IDs to lists of interactions ([timestamp, itemid])
     usernum = 0
-    itemmap = {}
     itemnum = 0
-    User = {}
+    threshold = 4  # Minimum interactions required.
+    timestamp_counter = 0  # Dummy timestamp counter (since real timestamps are absent)
 
-    # Set threshold for minimum interactions.
-    threshold = 4
-    timestamp_counter = 0  # Arbitrary timestamp incrementer; assumed order inherently captures this dummy var
-
-    # Second pass: build mappings and the User dictionary.
-    for idx, row in df.iterrows():
-        org = row["org_id_encoded"]
+    for idx, row in df_holdings.iterrows():
+        investor = row["filer_id"]
         stock = row["stock_id"]
-        # Assign an arbitrary timestamp using the counter.
         timestamp = timestamp_counter
         timestamp_counter += 1
 
-        if countU[org] < threshold or countP[stock] < threshold:
+        # Only include interactions if both investor and stock have enough interactions.
+        if countU[investor] < threshold or countP[stock] < threshold:
             continue
 
-        # Map original org_id to new integer id.
-        if org in usermap:
-            userid = usermap[org]
-        else:
+        # Map the investor (filer_id) to a new integer ID.
+        if investor not in usermap:
             usernum += 1
-            userid = usernum
-            usermap[org] = userid
-            User[userid] = []
+            usermap[investor] = usernum
+            User[usernum] = []
+        userid = usermap[investor]
 
-        # Map original stock_id to new integer id.
-        if stock in itemmap:
-            itemid = itemmap[stock]
-        else:
+        # Map the stock (stock_id) to a new integer ID.
+        if stock not in itemmap:
             itemnum += 1
-            itemid = itemnum
-            itemmap[stock] = itemid
+            itemmap[stock] = itemnum
+        itemid = itemmap[stock]
 
-        # Append interaction as [timestamp, itemid].
+        # Append the interaction as [timestamp, itemid].
         User[userid].append([timestamp, itemid])
 
-    # Load the orgs CSV to build org_dict.
+    # --- Enriching stock metadata from df_orgs ---
     df_orgs = pd.read_csv(processed_org_path)
-
-    # Create a dictionary with two keys: "bio" and "stock_ticker"
-    text_name_dict = {"bio": {}, "stock_ticker": {}}
-    for orig_org, new_id in usermap.items():
-        # Filter df_orgs rows where org_id matches.
-        row = df_orgs[df_orgs["org_id_encoded"] == orig_org]
-        if not row.empty:
-            bio = row.iloc[0].get("bio", "No bio available")
-            ticker = row.iloc[0].get("stock_ticker", "Unknown")
+    df_stocks = pd.read_csv("guilherme/data/raw/stocks.csv")
+    item_meta_dict = {
+        "bio": {},
+        "stock_ticker": {},
+        "stock_industry": {},
+        "stock_sector": {},
+        "company_name": {},
+    }
+    missing_count = 0
+    for stock_id, new_id in itemmap.items():
+        stocks_row = df_stocks[df_stocks["id"] == stock_id]
+        stock_ticker = stocks_row["symbol"]
+        company_name = stocks_row["name"]
+        stock_sector = stocks_row["sector"]
+        stock_industry = stocks_row["industry"]
+        # may not always have bio
+        orgs_row = df_orgs[df_orgs["stock_id"] == stock_id]
+        if not orgs_row.empty:
+            bio = orgs_row["bio"]
         else:
+            missing_count += 1
             bio = "No bio available"
-            ticker = "Unknown"
-        # Instead of using new_id as the key for a nested dict,
-        # assign it as a key in each top-level dictionary.
-        text_name_dict["bio"][new_id] = bio
-        text_name_dict["stock_ticker"][new_id] = ticker
-
-    # Save the org_dict dictionary as a gzipped pickle file.
+        item_meta_dict[new_id] = {
+            "bio": bio,
+            "stock_ticker": stock_ticker,
+            "stock_industry": stock_industry,
+            "stock_sector": stock_sector,
+            "company_name": company_name,
+        }
+    print(f"Missing {missing_count} item (stock) bios!")
+    # Save the org_dict as a gzipped pickle file.
     org_dict_path = "guilherme/data/processed/holdings_org_dict.pkl.gz"
     with gzip.open(org_dict_path, "wb") as tf:
-        pickle.dump(text_name_dict, tf)
+        pickle.dump(item_meta_dict, tf)
 
-    print("Total new org IDs:", usernum, "Total new stock IDs:", itemnum)
+    print("Total new investor IDs:", usernum, "Total new stock IDs:", itemnum)
 
-    # List of interactions for that user will be sorted in ascending order based on the timestamp.
-    # This ensures that the interactions are ordered according to the time they occurred
-    # (or, in our case, the arbitrary order defined by our arbitrary counter).
+    # --- Sorting interactions per investor ---
     for userid in User.keys():
         User[userid].sort(key=lambda x: x[0])
 
-    # Write out a text file with one interaction per line in the format "userid itemid".
+    # --- Writing the interactions to a text file ---
     with open(seq_out_file, "w") as f:
         for user in User.keys():
             for interaction in User[user]:
-                # interaction[1] is the itemid.
                 f.write("%d %d\n" % (user, interaction[1]))
 
 
 ##############################################
 # SASRec Main Routine
 ##############################################
+
+"""
+For a baseline like SASRec, the standard setup relies on the sequential patterns from historical interactions 
+to learn user (investor) embeddings implicitly.This means that, by default, the model learns user 
+representations purely from the sequence of investments.
+"""
 parser = argparse.ArgumentParser()
 parser.add_argument(
     "--dataset",
@@ -263,13 +264,13 @@ parser.add_argument(
     help="Path to the processed orgs CSV file",
     default="guilherme/data/processed/orgs_processed.csv",
 )
-parser.add_argument("--batch_size", default=64, type=int)
-parser.add_argument("--lr", default=0.001, type=float)
-parser.add_argument("--maxlen", default=58, type=int)  # around the avg
-parser.add_argument("--hidden_units", default=128, type=int) # for our use-case this must match latent dim of CF
+parser.add_argument("--batch_size", default=32, type=int)
+parser.add_argument("--lr", default=0.0008, type=float)
+parser.add_argument("--maxlen", default=54, type=int)  # around the avg
+parser.add_argument("--hidden_units", default=128, type=int)
 parser.add_argument("--num_blocks", default=2, type=int)
-parser.add_argument("--num_epochs", default=100, type=int)
-parser.add_argument("--num_heads", default=1, type=int)
+parser.add_argument("--num_epochs", default=300, type=int)
+parser.add_argument("--num_heads", default=2, type=int)
 parser.add_argument("--dropout_rate", default=0.5, type=float)
 parser.add_argument("--l2_emb", default=0.0, type=float)
 parser.add_argument(
@@ -312,10 +313,8 @@ if __name__ == "__main__":
         print(
             "Detected new features to enrich baseline or raw interactions text file does not exist; creating one from holdings CSV..."
         )
-        df = read_csv_with_progress(args.dataset, chunksize=256, total_rows=173922)
+        df = read_csv_with_progress(args.dataset, chunksize=256, total_rows=173944)
         print("Columns in the DataFrame:", df.columns.tolist())
-        # Call preprocess() to generate interactions file and save org meta.
-        # Assume preprocess() writes the file at args.seq_file.
         preprocess(df, args.processed_orgs_csv, args.seq_file)
         print("Raw interactions text file saved to", args.seq_file)
     else:
@@ -413,7 +412,6 @@ if __name__ == "__main__":
         negative samples (what the user did not do) are used. The model uses both sets of 
         logits to compute a loss (often a binary cross-entropy or pairwise ranking loss) that 
         encourages the model to rank positive items higher than negatives.
-    
     """
 
     # --- Training Loop ---

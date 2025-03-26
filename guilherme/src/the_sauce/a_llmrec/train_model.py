@@ -97,6 +97,7 @@ def train_model_phase1_(rank, world_size, args):
             u, seq, pos, neg = u.numpy(), seq.numpy(), pos.numpy(), neg.numpy()
             model(
                 [u, seq, pos, neg],
+                args,
                 optimizer=adam_optimizer,
                 batch_iter=[epoch, args.num_epochs + 1, step, num_batch],
                 mode="phase1",

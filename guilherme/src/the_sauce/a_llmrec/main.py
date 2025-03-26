@@ -17,9 +17,9 @@ if __name__ == "__main__":
     parser.add_argument("--recsys", type=str, default="sasrec")
 
     # train phase setting
-    parser.add_argument("--pretrain_stage1", action="store_true")
+    parser.add_argument("--pretrain_stage1", action="store_true", default=True)
     parser.add_argument("--pretrain_stage2", action="store_true")
-    parser.add_argument("--inference", action="store_true", default=True)
+    parser.add_argument("--inference", action="store_true", default=False)
     parser.add_argument("--email_extension", type=str, default=["cvshealth.com", "baxter.com", "netflix.com"])
 
     # hyperparameters options

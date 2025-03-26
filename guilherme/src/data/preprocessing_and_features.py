@@ -179,70 +179,67 @@ def populate_missing_stock_fields_in_holdings(df_holdings, stocks_csv_path):
       - If stock_id is present but stock_ticker is missing, look up the stock_ticker
         from stocks.csv using stock_id.
       - If stock_ticker is present but stock_id is missing, look up the stock_id using stock_ticker.
-      - If both are missing or if a lookup fails, the row is marked for deletion.
-      - In addition, rows with a stock_id equal to -1 or 0 (after conversion) are dropped.
+      - If both are missing or if a lookup fails, populate stock_ticker with "Unknown" and stock_id with "0".
 
     Returns:
-      Updated df_holdings with missing fields filled from stocks.csv, and with rows having
-      invalid stock_id (-1 or 0) removed.
+      Updated df_holdings with missing fields filled from stocks.csv, with defaults where lookups fail.
     """
+    import pandas as pd
+
     # Read only the necessary columns from stocks.csv.
-    df_stocks = pd.read_csv(stocks_csv_path, usecols=['id', 'symbol'])
-    
+    df_stocks = pd.read_csv(stocks_csv_path, usecols=["id", "symbol"])
+
     # Rename columns to match df_holdings.
-    df_stocks.rename(columns={'id': 'stock_id', 'symbol': 'stock_ticker'}, inplace=True)
-    
+    df_stocks.rename(columns={"id": "stock_id", "symbol": "stock_ticker"}, inplace=True)
+
     # Standardize the key fields to strings.
-    df_stocks['stock_id'] = df_stocks['stock_id'].astype(str).str.strip()
-    df_stocks['stock_ticker'] = df_stocks['stock_ticker'].astype(str).str.strip()
-    
+    df_stocks["stock_id"] = df_stocks["stock_id"].astype(str).str.strip()
+    df_stocks["stock_ticker"] = df_stocks["stock_ticker"].astype(str).str.strip()
+
     # Build lookup dictionaries.
-    lookup_by_id = df_stocks.set_index('stock_id')['stock_ticker'].to_dict()
-    lookup_by_ticker = df_stocks.set_index('stock_ticker')['stock_id'].to_dict()
-    
-    # Prepare a list to record rows to drop.
-    drop_indices = []
-    
+    lookup_by_id = df_stocks.set_index("stock_id")["stock_ticker"].to_dict()
+    lookup_by_ticker = df_stocks.set_index("stock_ticker")["stock_id"].to_dict()
+
     def update_row(row):
         # Standardize current row values.
-        stock_id = str(row.get('stock_id')).strip() if pd.notna(row.get('stock_id')) else None
-        stock_ticker = str(row.get('stock_ticker')).strip() if pd.notna(row.get('stock_ticker')) and row.get('stock_ticker') != "" else None
-        
-        # Case 1: Both values exist -> do nothing.
+        stock_id = (
+            str(int(row.get("stock_id"))) if pd.notna(row.get("stock_id")) else None
+        )
+        stock_ticker = (
+            str(row.get("stock_ticker")).strip()
+            if pd.notna(row.get("stock_ticker")) and row.get("stock_ticker") != ""
+            else None
+        )
+
+        # Case 1: Both values exist -> nothing to change.
         if stock_id and stock_ticker:
             return row
-        # Case 2: stock_id exists but stock_ticker is missing -> look up ticker.
+        # Case 2: stock_id exists but stock_ticker is missing.
         elif stock_id and not stock_ticker:
             candidate = lookup_by_id.get(stock_id)
             if candidate:
-                row['stock_ticker'] = candidate
+                row["stock_ticker"] = candidate
             else:
-                drop_indices.append(row.name)
-        # Case 3: stock_ticker exists but stock_id is missing -> look up stock_id.
+                row["stock_ticker"] = "Unknown"
+        # Case 3: stock_ticker exists but stock_id is missing.
         elif stock_ticker and not stock_id:
             candidate = lookup_by_ticker.get(stock_ticker)
             if candidate:
-                row['stock_id'] = candidate
+                row["stock_id"] = candidate
             else:
-                drop_indices.append(row.name)
-        # Case 4: Both are missing -> drop the row.
+                row["stock_id"] = "0"
+        # Case 4: Both are missing.
         else:
-            drop_indices.append(row.name)
+            row["stock_id"] = "0"
+            row["stock_ticker"] = "Unknown"
         return row
 
+    # Apply the update_row function across the DataFrame.
     df_holdings_updated = df_holdings.apply(update_row, axis=1)
-    df_holdings_updated = df_holdings_updated.drop(index=drop_indices)
-    
-    # Drop rows where stock_id (converted to float) is -1 or 0.
-    def valid_stock_id(sid):
-        try:
-            return float(sid) not in [-1, 0]
-        except Exception:
-            return False
 
-    df_holdings_updated = df_holdings_updated[df_holdings_updated['stock_id'].apply(valid_stock_id)]
-    
+    # NOTE: We no longer drop rows with stock_id -1 or 0 --> relabel to 0
     return df_holdings_updated
+
 
 ##############################################
 # FEATURE ENGINEERING FUNCTIONS
@@ -282,7 +279,9 @@ def engineer_holdings_features(df_holdings):
     )
 
     # Fill any remaining missing values in each column with the column's median.
-    for col in df_holdings.columns:
+     # Fill missing values only in numeric columns with the median.
+    numeric_cols = df_holdings.select_dtypes(include=[np.number]).columns
+    for col in numeric_cols:
         if df_holdings[col].isna().sum() > 0:
             median = df_holdings[col].median()
             df_holdings[col] = df_holdings[col].fillna(median)
@@ -380,7 +379,7 @@ def process_csv(df, onehot_cols, ordinal_cols, numeric_override=None, key_cols=N
 
     Note:
       - Key columns (e.g. org_id, email_extension) are preserved.
-      - Shared categorical columns (stock_id, filer_id, stock_ticker) are one-hot encoded.
+      - Shared categorical columns (stock_id, filer_id, stock_ticker) are one-hot encoded NOTE not necessary for this but for future maybe
     """
     # Temporarily remove key columns.
     keys = {}
@@ -528,7 +527,7 @@ def create_union_mapping(df1, df2, col):
 ##############################################
 # MAIN FUNCTION
 ##############################################
-def main(orgs_csv_path, holdings_csv_path, stocks_csv_path):
+def main(orgs_csv_path, holdings_csv_path, stocks_csv_path, filers_csv_path):
     """
     Main function to process orgs, holdings, and stocks CSV files.
 
@@ -536,7 +535,7 @@ def main(orgs_csv_path, holdings_csv_path, stocks_csv_path):
       1. Load raw CSV files.
       2. Preprocess holdings:
          - Drop unneeded columns.
-         - Populate missing fields using stocks.csv.
+         - Populate missing fields using stocks.csv and filer.csv.
          - Fill missing market values, ranking, and shares.
          - Drop rows missing current_shares.
          - Impute position_change_type.
@@ -566,19 +565,20 @@ def main(orgs_csv_path, holdings_csv_path, stocks_csv_path):
             "source",
             "quarter_id_owned",
             "quarter_end_price",
-            "filer_street_address",
-            "filer_city",
-            "filer_state",
-            "filer_zip_code",
             "id",
             "source_date",
         ]
     )
-    # Populate missing fields using stocks.csv, namely stock_ticker and stock_id else have to drop if we can't find
-    # BUG 429 NaNs here from ingestion, 429 and expect to degrade performance
+
+
+    
+    # Populate missing fields using stocks.csv aka ITEMS, namely stock_ticker and stock_id else defaults
     df_holdings = populate_missing_stock_fields_in_holdings(
         df_holdings, stocks_csv_path
     )
+
+    # Same thing with USER but drop as can't id user -- 429 lost; 22 for stock_tickers
+    df_holdings = df_holdings.dropna(subset=["filer_id", "stock_ticker", "stock_id"])
 
     # Fill missing market values and percentage fields with 0.
     df_holdings[
@@ -602,9 +602,6 @@ def main(orgs_csv_path, holdings_csv_path, stocks_csv_path):
     # Fill missing ranking fields with a default high value.
     df_holdings["current_ranking"] = df_holdings["current_ranking"].fillna(999999)
     df_holdings["previous_ranking"] = df_holdings["previous_ranking"].fillna(999999)
-
-    # Fill missing filer information.
-    df_holdings["filer_id"] = df_holdings["filer_id"].fillna(0)
 
     # Drop columns that are not required -- already have id accounted for right before
     df_holdings = df_holdings.drop(
@@ -657,14 +654,13 @@ def main(orgs_csv_path, holdings_csv_path, stocks_csv_path):
         columns=["stock_name"]
     )  # stock_id, stock_ticker describes these
 
-
     # --- Feature Engineering on Holdings ---
     df_holdings = engineer_holdings_features(df_holdings)
 
     # --- Preprocess Orgs Data ---
     df_orgs = fill_missing_from_holdings_with_two_matches(df_orgs, df_holdings)
-    df_orgs = df_orgs.dropna(subset=["filer_id", "stock_id", "stock_ticker"])
-    df_orgs = df_orgs.drop(columns=["cik"])
+    df_orgs = df_orgs.dropna(subset=["stock_id", "stock_ticker", "filer_id"])
+    df_orgs = df_orgs.drop(columns=["cik"])  # choosing filer_id instead of cik
 
     # --- Feature Engineering on Orgs ---
     df_orgs = engineer_org_features(df_orgs, df_holdings)
@@ -672,9 +668,8 @@ def main(orgs_csv_path, holdings_csv_path, stocks_csv_path):
     ##############################################
     # ENSURE CONSISTENT ONE-HOT ENCODING FOR SHARED COLUMNS
     ##############################################
-    # Shared columns (stock id and filer_id) should be label-encoded (not one-hot encoded) along with keys (email and org id)
-    # These are strings that can be encoded as int to save space and work with downstream modeling (expect int ref).
-    # We also assume filer and stock ids are matching as they come from WhaleWatchers API which we assume is consistent.
+    # Shared columns should generate a master list of IDs for traceability -- idk why i did this tbh
+    # We assume filer and stock ids are matching as they come from WhaleWatchers API which we assume is consistent.
     org_id_map = create_union_mapping(df_orgs, df_holdings, "org_id")
     email_ext_map = create_union_mapping(df_orgs, df_holdings, "email_extension")
 
@@ -689,8 +684,6 @@ def main(orgs_csv_path, holdings_csv_path, stocks_csv_path):
 
     df_holdings = df_holdings.drop(columns=["org_id", "email_extension"])
     df_orgs = df_orgs.drop(columns=["org_id", "email_extension"])
-
-    # BUG at this point have
 
     # Save the mapping dictionaries to files in your raw folder.
     with open("guilherme/data/raw/org_id_map.pkl", "wb") as f:
@@ -825,6 +818,13 @@ if __name__ == "__main__":
         default="guilherme/data/raw/holdings.csv",
     )
     parser.add_argument(
+        "--filers",
+        type=str,
+        required=False,
+        help="Path to the filers.csv file (default: guilherme/data/raw/filers.csv)",
+        default="guilherme/data/raw/filers.csv",
+    )
+    parser.add_argument(
         "--stocks",
         type=str,
         required=False,
@@ -833,4 +833,4 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    main(args.orgs, args.holdings, args.stocks)
+    main(args.orgs, args.holdings, args.stocks, args.filers)
